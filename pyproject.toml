@@ -11,10 +11,28 @@ requires-python = ">=3.10"
 authors = [{ name = "MemOS-Q Contributors" }]
 license = { text = "MIT" }
 keywords = ["ai", "agents", "memory", "qwen", "mcp"]
-dependencies = []
+dependencies = ["requests>=2.32"]
 
 [project.optional-dependencies]
-api = ["fastapi>=0.111", "uvicorn>=0.30"]
+api = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "prometheus-fastapi-instrumentator>=7.0",
+]
+live = [
+    "boto3>=1.35",
+    "celery>=5.4",
+    "psycopg[binary]>=3.2",
+    "qwen-agent>=0.0.26",
+    "redis>=5.2",
+]
+monitoring = [
+    "langfuse>=2.56",
+    "opentelemetry-api>=1.29",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.29",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+    "opentelemetry-sdk>=1.29",
+]
 test = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]

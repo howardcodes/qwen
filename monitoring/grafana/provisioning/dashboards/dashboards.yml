@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: MemOS-Q
+    orgId: 1
+    folder: MemOS-Q
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
