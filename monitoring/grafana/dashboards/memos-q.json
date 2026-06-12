@@ -1,0 +1,13 @@
+{
+  "title": "MemOS-Q API",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "HTTP Requests",
+      "targets": [{ "expr": "http_requests_total", "refId": "A" }],
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+    }
+  ]
+}
