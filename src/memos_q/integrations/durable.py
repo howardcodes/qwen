@@ -38,22 +38,23 @@ class PostgresMemoryStore:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
             cursor.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     memory_type TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    embedding vector(1536),
+                    embedding vector({self.config.qwen_embedding_dimensions}),
                     confidence_score DOUBLE PRECISION NOT NULL,
                     importance_score DOUBLE PRECISION NOT NULL,
                     novelty_score DOUBLE PRECISION NOT NULL,
                     stability_score DOUBLE PRECISION NOT NULL,
+                    confidence_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
                     status TEXT NOT NULL,
                     version INTEGER NOT NULL,
                     source_session TEXT NOT NULL,
                     tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL,
                     last_recalled_at TIMESTAMPTZ,
@@ -85,6 +86,12 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_memory_type ON memories(memory_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING gin(tags)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
         self.connection.commit()
 
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
@@ -95,10 +102,10 @@ class PostgresMemoryStore:
                 """
                 INSERT INTO memories (
                     id, user_id, memory_type, content, confidence_score,
-                    importance_score, novelty_score, stability_score, status,
-                    version, source_session, tags, metadata, created_at, updated_at,
-                    last_recalled_at, expires_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    importance_score, novelty_score, stability_score, confidence_reasons,
+                    status, version, source_session, tags, metadata, created_at, updated_at,
+                    last_recalled_at, expires_at, embedding
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     memory.id,
@@ -109,6 +116,7 @@ class PostgresMemoryStore:
                     memory.importance_score,
                     memory.novelty_score,
                     memory.stability_score,
+                    json.dumps(memory.confidence_reasons),
                     memory.status.value,
                     memory.version,
                     memory.source_session,
@@ -118,6 +126,7 @@ class PostgresMemoryStore:
                     memory.updated_at,
                     memory.last_recalled_at,
                     memory.expires_at,
+                    memory.embedding,
                 ),
             )
             self._record_audit(cursor, "remember", actor, memory.id, None, memory_snapshot(memory))
@@ -131,9 +140,9 @@ class PostgresMemoryStore:
             cursor.execute(
                 """
                 SELECT id, user_id, memory_type, content, confidence_score,
-                       importance_score, novelty_score, stability_score, status,
+                       importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, expires_at
+                       updated_at, last_recalled_at, expires_at, embedding
                 FROM memories
                 WHERE id = %s
                 """,
@@ -160,8 +169,9 @@ class PostgresMemoryStore:
                 UPDATE memories
                 SET memory_type = %s, content = %s, confidence_score = %s,
                     importance_score = %s, novelty_score = %s, stability_score = %s,
-                    status = %s, version = %s, tags = %s, metadata = %s,
-                    updated_at = %s, last_recalled_at = %s, expires_at = %s
+                    confidence_reasons = %s, status = %s, version = %s, tags = %s,
+                    metadata = %s, updated_at = %s, last_recalled_at = %s,
+                    expires_at = %s, embedding = %s
                 WHERE id = %s
                 """,
                 (
@@ -171,6 +181,7 @@ class PostgresMemoryStore:
                     memory.importance_score,
                     memory.novelty_score,
                     memory.stability_score,
+                    json.dumps(memory.confidence_reasons),
                     memory.status.value,
                     memory.version,
                     json.dumps(sorted(memory.tags)),
@@ -178,6 +189,7 @@ class PostgresMemoryStore:
                     memory.updated_at,
                     memory.last_recalled_at,
                     memory.expires_at,
+                    memory.embedding,
                     memory.id,
                 ),
             )
@@ -238,6 +250,13 @@ class PostgresMemoryStore:
                 for row in cursor.fetchall()
             ]
 
+    def list_user_ids(self) -> list[str]:
+        """Load ids for users that have memory records."""
+
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT DISTINCT user_id FROM memories ORDER BY user_id")
+            return [row[0] for row in cursor.fetchall()]
+
     def audit_log(self, memory_id: str | None = None) -> list[AuditEvent]:
         """Load audit log entries."""
 
@@ -273,14 +292,33 @@ class PostgresMemoryStore:
             cursor.execute(
                 f"""
                 SELECT id, user_id, memory_type, content, confidence_score,
-                       importance_score, novelty_score, stability_score, status,
+                       importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, expires_at
+                       updated_at, last_recalled_at, expires_at, embedding
                 FROM memories
                 WHERE user_id = %s {status_clause}
                 ORDER BY created_at
                 """,
                 (user_id,),
+            )
+            return [memory_from_row(row) for row in cursor.fetchall()]
+
+    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[Memory]:
+        """Load nearest active memories using pgvector cosine distance."""
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, user_id, memory_type, content, confidence_score,
+                       importance_score, novelty_score, stability_score, confidence_reasons, status,
+                       version, source_session, tags, metadata, created_at,
+                       updated_at, last_recalled_at, expires_at, embedding
+                FROM memories
+                WHERE user_id = %s AND status = 'active' AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (user_id, query_embedding, limit),
             )
             return [memory_from_row(row) for row in cursor.fetchall()]
 
@@ -360,6 +398,7 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         importance_score,
         novelty_score,
         stability_score,
+        confidence_reasons,
         status,
         version,
         source_session,
@@ -369,11 +408,14 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         updated_at,
         last_recalled_at,
         expires_at,
+        embedding,
     ) = row
     if isinstance(tags, str):
         tags = json.loads(tags)
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
+    if isinstance(confidence_reasons, str):
+        confidence_reasons = json.loads(confidence_reasons)
     return Memory(
         id=memory_id,
         user_id=user_id,
@@ -388,6 +430,8 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         source_session=source_session,
         tags=set(tags or []),
         metadata=dict(metadata or {}),
+        confidence_reasons=list(confidence_reasons or []),
+        embedding=list(embedding or []),
         created_at=created_at,
         updated_at=updated_at,
         last_recalled_at=last_recalled_at,

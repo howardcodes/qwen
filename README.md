@@ -40,6 +40,10 @@ Then edit `.env` and replace placeholders such as:
 
 ```bash
 QWEN_API_KEY=replace-with-your-qwen-api-key
+QWEN_EMBEDDING_MODEL=text-embedding-v4
+QWEN_EMBEDDING_DIMENSIONS=1024
+# Set true in production to fail closed if Alibaba/Qwen embedding calls fail.
+QWEN_REQUIRE_LIVE_EMBEDDINGS=false
 LANGFUSE_PUBLIC_KEY=replace-with-langfuse-public-key
 LANGFUSE_SECRET_KEY=replace-with-langfuse-secret-key
 POSTGRES_PASSWORD=memos
@@ -175,10 +179,10 @@ curl http://localhost:8000/health
 ```bash
 curl -X POST http://localhost:8000/memories \
   -H 'Content-Type: application/json' \
+  -H 'x-user-id: demo-user' \
   -d '{
-    "user_id": "demo-user",
     "content": "User prefers concise answers about AI agents.",
-    "memory_type": "semantic",
+    "memory_type": "preference",
     "source_session": "manual-smoke-test",
     "tags": ["preference", "agents"]
   }'
@@ -187,8 +191,8 @@ curl -X POST http://localhost:8000/memories \
 ```bash
 curl -X POST http://localhost:8000/recall \
   -H 'Content-Type: application/json' \
+  -H 'x-user-id: demo-user' \
   -d '{
-    "user_id": "demo-user",
     "query": "How should I answer this user about agents?",
     "limit": 3
   }'
@@ -203,8 +207,8 @@ Live QwenCloud calls require a real `QWEN_API_KEY` in `.env`:
 ```bash
 curl -X POST http://localhost:8000/agent/chat \
   -H 'Content-Type: application/json' \
+  -H 'x-user-id: demo-user' \
   -d '{
-    "user_id": "demo-user",
     "message": "What do you remember about me?",
     "source_session": "live-qwen-smoke-test"
   }'

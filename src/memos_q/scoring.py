@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from collections.abc import Iterable
@@ -10,6 +11,7 @@ from datetime import datetime
 from .models import Memory, clamp_score, utc_now
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+EMBEDDING_DIMENSIONS = 64
 
 
 def tokenize(text: str) -> set[str]:
@@ -18,9 +20,35 @@ def tokenize(text: str) -> set[str]:
     return set(TOKEN_RE.findall(text.lower()))
 
 
+def local_embedding(text: str, *, dimensions: int = EMBEDDING_DIMENSIONS) -> list[float]:
+    """Create a deterministic hashed embedding for local tests and offline use.
+
+    Production deployments can replace this with Alibaba Cloud/Qwen embeddings
+    while preserving the same vector-search flow.
+    """
+
+    vector = [0.0] * dimensions
+    for token in TOKEN_RE.findall(text.lower()):
+        digest = hashlib.sha256(token.encode()).digest()
+        index = int.from_bytes(digest[:4], "big") % dimensions
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        vector[index] += sign
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / norm for value in vector]
+
+
+def cosine_similarity(left: list[float] | None, right: list[float] | None) -> float:
+    """Return cosine similarity mapped to the inclusive [0, 1] range."""
+
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    return clamp_score((dot + 1.0) / 2.0)
+
+
 def keyword_score(query: str, memory: Memory) -> float:
     """Return token overlap between a query and a memory."""
-    # To improve: this is a very basic keyword matching score. In production, this could be enhanced with synonym expansion, stemming, or replaced entirely with embedding-based similarity.
+
     query_tokens = tokenize(query)
     memory_tokens = tokenize(memory.content) | memory.tags
     if not query_tokens or not memory_tokens:
@@ -28,20 +56,16 @@ def keyword_score(query: str, memory: Memory) -> float:
     return len(query_tokens & memory_tokens) / len(query_tokens | memory_tokens)
 
 
-def semantic_score(query: str, memory: Memory) -> float:
-    """Approximate semantic similarity without external embeddings.
+def semantic_score(query: str, memory: Memory, query_embedding: list[float] | None = None) -> float:
+    """Return embedding similarity with a token-similarity fallback."""
 
-    The production system is expected to replace this deterministic token
-    similarity with Qwen embedding or reranking calls. Keeping this local makes
-    the prototype testable without network credentials.
-    """
-
+    if query_embedding is None and memory.embedding:
+        query_embedding = local_embedding(query, dimensions=len(memory.embedding))
+    vector_score = cosine_similarity(query_embedding, memory.embedding)
     query_tokens = tokenize(query)
     memory_tokens = tokenize(memory.content)
-    if not query_tokens or not memory_tokens:
-        return 0.0
-    overlap = len(query_tokens & memory_tokens)
-    return overlap / math.sqrt(len(query_tokens) * len(memory_tokens))
+    token_score = 0.0 if not query_tokens or not memory_tokens else len(query_tokens & memory_tokens) / math.sqrt(len(query_tokens) * len(memory_tokens))
+    return max(vector_score, token_score)
 
 
 def recency_score(timestamp: datetime | None) -> float:
@@ -67,11 +91,15 @@ def hybrid_retrieval_score(
     memory: Memory,
     *,
     query_tags: Iterable[str] = (),
+    query_embedding: list[float] | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Compute the weighted retrieval score and individual signals."""
+    """Compute weighted vector/keyword retrieval score and individual signals."""
 
+    if query_embedding is None and memory.embedding:
+        query_embedding = local_embedding(query, dimensions=len(memory.embedding))
     signals = {
-        "semantic": semantic_score(query, memory),
+        "vector": cosine_similarity(query_embedding, memory.embedding),
+        "semantic": semantic_score(query, memory, query_embedding=query_embedding),
         "keyword": keyword_score(query, memory),
         "recency": recency_score(memory.last_recalled_at or memory.updated_at),
         "importance": memory.importance_score,
@@ -79,26 +107,33 @@ def hybrid_retrieval_score(
         "graph": graph_proximity_score(memory, query_tags),
     }
     score = (
-        0.35 * signals["semantic"]
-        + 0.20 * signals["keyword"]
-        + 0.15 * signals["recency"]
-        + 0.15 * signals["importance"]
+        0.30 * signals["vector"]
+        + 0.20 * signals["semantic"]
+        + 0.15 * signals["keyword"]
+        + 0.10 * signals["recency"]
+        + 0.10 * signals["importance"]
         + 0.10 * signals["confidence"]
         + 0.05 * signals["graph"]
     )
     return clamp_score(score), signals
 
 
-def quality_scores(content: str, existing_memories: Iterable[Memory]) -> dict[str, float]:
-    """Estimate quality scores for a candidate memory."""
+def quality_scores(content: str, existing_memories: Iterable[Memory]) -> dict[str, object]:
+    """Estimate quality scores and reasons for a candidate memory."""
 
     words = tokenize(content)
     matching_existing = [keyword_score(content, memory) for memory in existing_memories]
     max_overlap = max(matching_existing, default=0.0)
-    stable_markers = {"prefer", "uses", "works", "interested", "always", "usually"}
+    stable_markers = {"prefer", "prefers", "uses", "works", "interested", "always", "usually"}
+    reasons = ["deterministic local quality scorer"]
+    if words & stable_markers:
+        reasons.append("contains stable preference/fact markers")
+    if max_overlap > 0.7:
+        reasons.append("similar to an existing memory")
     return {
         "importance": clamp_score(min(1.0, 0.35 + len(words) / 40)),
         "confidence": 0.8,
         "novelty": clamp_score(1 - max_overlap),
         "stability": clamp_score(0.45 + (0.25 if words & stable_markers else 0.0)),
+        "confidence_reasons": reasons,
     }

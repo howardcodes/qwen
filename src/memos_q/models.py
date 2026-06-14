@@ -13,14 +13,24 @@ class MemoryStatus(StrEnum):
     """Lifecycle state for a memory."""
 
     ACTIVE = "active"
+    PENDING_REVIEW = "pending_review"
+    NEEDS_CONFIRMATION = "needs_confirmation"
+    REJECTED = "rejected"
+    POSSIBLY_CONFLICTING = "possibly_conflicting"
     DEPRECATED = "deprecated"
     ARCHIVED = "archived"
     FORGOTTEN = "forgotten"
 
 
 class MemoryType(StrEnum):
-    """Supported memory layers."""
+    """Supported memory layers and durable production categories."""
 
+    USER_FACT = "user_fact"
+    PREFERENCE = "preference"
+    TASK = "task"
+    PROJECT_CONTEXT = "project_context"
+    CONVERSATION_SUMMARY = "conversation_summary"
+    SYSTEM_TOOL_EVENT = "system_tool_event"
     WORKING = "working"
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
@@ -55,6 +65,8 @@ class Memory:
     importance_score: float = 0.5
     novelty_score: float = 0.5
     stability_score: float = 0.5
+    confidence_reasons: list[str] = field(default_factory=list)
+    embedding: list[float] | None = None
     tags: set[str] = field(default_factory=set)
     metadata: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid4()))
@@ -67,6 +79,7 @@ class Memory:
 
     def __post_init__(self) -> None:
         self.memory_type = MemoryType(self.memory_type)
+        self.status = MemoryStatus(self.status)
         self.confidence_score = clamp_score(self.confidence_score)
         self.importance_score = clamp_score(self.importance_score)
         self.novelty_score = clamp_score(self.novelty_score)

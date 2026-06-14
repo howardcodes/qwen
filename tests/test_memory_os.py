@@ -86,3 +86,32 @@ def test_forget_keeps_audit_history():
 
     assert memory_os.inspect("user-1") == []
     assert any(event.action == "update" for event in memory_os.store.audit_log(memory.id))
+
+
+class RecordingEmbeddingProvider:
+    def __init__(self):
+        self.texts = []
+
+    def embed_text(self, text: str) -> list[float]:
+        self.texts.append(text)
+        if "Python" in text:
+            return [1.0, 0.0]
+        if "Rust" in text:
+            return [0.0, 1.0]
+        return [1.0, 0.0]
+
+    def embed_texts(self, texts):
+        return [self.embed_text(text) for text in texts]
+
+
+def test_memory_os_uses_embedding_provider_for_remember_and_recall():
+    provider = RecordingEmbeddingProvider()
+    memory_os = MemoryOS(embedding_provider=provider, fallback_embedding_dimensions=2)
+    memory_os.remember(user_id="user-1", content="User prefers Python.", source_session="session-1")
+    memory_os.remember(user_id="user-1", content="Project uses Rust.", source_session="session-2")
+
+    results = memory_os.recall("user-1", "Python", limit=1)
+
+    assert results[0].memory.content == "User prefers Python."
+    assert "vector" in results[0].explanation.ranking_signals
+    assert "Python" in provider.texts
