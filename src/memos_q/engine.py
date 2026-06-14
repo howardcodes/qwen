@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from typing import Protocol
 
 from .models import (
     Memory,
@@ -26,15 +27,35 @@ from .models import (
     clamp_score,
     utc_now,
 )
-from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, quality_scores, tokenize
+from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, local_embedding, quality_scores, tokenize
 from .store import InMemoryStore
+
+
+class EmbeddingProvider(Protocol):
+    """Provider interface for QwenCloud/Alibaba text embeddings."""
+
+    def embed_text(self, text: str) -> list[float]:
+        """Embed one text value."""
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed multiple text values preserving input order."""
 
 
 class MemoryOS:
     """Self-correcting memory manager for AI agents."""
 
-    def __init__(self, store: InMemoryStore | None = None) -> None:
-        self.store = store or InMemoryStore() # KIV In production, this would be a persistent database-backed store
+    def __init__(
+        self,
+        store: InMemoryStore | None = None,
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        require_live_embeddings: bool = False,
+        fallback_embedding_dimensions: int = 1024,
+    ) -> None:
+        self.store = store or InMemoryStore()
+        self.embedding_provider = embedding_provider
+        self.require_live_embeddings = require_live_embeddings
+        self.fallback_embedding_dimensions = fallback_embedding_dimensions
 
     def remember(
         self,
@@ -49,6 +70,8 @@ class MemoryOS:
         novelty_score: float | None = None,
         stability_score: float | None = None,
         metadata: dict[str, object] | None = None,
+        confidence_reasons: list[str] | None = None,
+        status: MemoryStatus = MemoryStatus.ACTIVE,
         actor: str = "memory-agent",
     ) -> Memory:
         """Create a memory and resolve obvious conflicts."""
@@ -60,12 +83,15 @@ class MemoryOS:
             content=content,
             memory_type=memory_type,
             source_session=source_session,
-            confidence_score=confidence_score if confidence_score is not None else scores["confidence"],
-            importance_score=importance_score if importance_score is not None else scores["importance"],
-            novelty_score=novelty_score if novelty_score is not None else scores["novelty"],
-            stability_score=stability_score if stability_score is not None else scores["stability"],
+            confidence_score=confidence_score if confidence_score is not None else float(scores["confidence"]),
+            importance_score=importance_score if importance_score is not None else float(scores["importance"]),
+            novelty_score=novelty_score if novelty_score is not None else float(scores["novelty"]),
+            stability_score=stability_score if stability_score is not None else float(scores["stability"]),
             tags=set(tags),
             metadata=dict(metadata or {}),
+            confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
+            embedding=self._embed_text(content),
+            status=status,
         )
         self.store.add_memory(memory, actor=actor)
         self._resolve_conflicts(memory, existing) # KIV This is a simple heuristic conflict resolution. In production, this could be more complex and involve human-in-the-loop review for certain cases.
@@ -82,8 +108,18 @@ class MemoryOS:
         """Return ranked memories with explainable recall metadata."""
 
         results: list[RecallResult] = []
-        for memory in self.store.list_memories(user_id):
-            score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags) # KIV In production, this would be a more sophisticated retrieval function possibly involving vector search and ML models
+        query_embedding = self._embed_text(query)
+        vector_candidates = self.store.vector_search(user_id, query_embedding, limit=max(limit * 4, 20))
+        candidate_memories = vector_candidates or self.store.list_memories(user_id)
+        for memory in candidate_memories:
+            if memory.embedding is None:
+                memory.embedding = self._embed_text(memory.content)
+            score, signals = hybrid_retrieval_score(
+                query,
+                memory,
+                query_tags=query_tags,
+                query_embedding=query_embedding,
+            )
             if score <= 0:
                 continue
             memory.last_recalled_at = utc_now()
@@ -125,6 +161,15 @@ class MemoryOS:
         archived = self._archive_stale(self.store.list_memories(user_id))
         return {"merged": merged, "promoted": promoted, "decayed": decayed, "archived": archived}
 
+    def _embed_text(self, text: str) -> list[float]:
+        if self.embedding_provider is not None:
+            try:
+                return self.embedding_provider.embed_text(text)
+            except Exception:
+                if self.require_live_embeddings:
+                    raise
+        return local_embedding(text, dimensions=self.fallback_embedding_dimensions)
+
     def _resolve_conflicts(self, new_memory: Memory, existing: list[Memory]) -> None:
         new_subject = _subject_key(new_memory.content)
         if not new_subject:
@@ -136,7 +181,7 @@ class MemoryOS:
                 continue
 
             # relationships between memories
-            if new_memory.confidence_score >= old_memory.confidence_score:
+            if new_memory.confidence_score >= old_memory.confidence_score and new_memory.metadata.get("source", "explicit_user") == "explicit_user":
                 self.store.update_memory(
                     old_memory.id,
                     actor="conflict-resolver",
@@ -156,6 +201,13 @@ class MemoryOS:
                     relation_type=RelationType.CONTRADICTS,
                 )
             )
+            if new_memory.metadata.get("source", "explicit_user") != "explicit_user":
+                self.store.update_memory(
+                    new_memory.id,
+                    actor="conflict-resolver",
+                    status=MemoryStatus.POSSIBLY_CONFLICTING,
+                    confidence_reasons=[*new_memory.confidence_reasons, "possible contradiction requires review"],
+                )
 
     def _reasoning_path(
         self,

@@ -26,6 +26,33 @@ def load_env_file(path: str | Path = ".env") -> None:
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
+_DEFAULTS = {
+    "environment": "development",
+    "api_base_url": "http://localhost:8000",
+    "frontend_url": "http://localhost:3000",
+    "memos_store": "memory",
+    "qwen_api_key": "",
+    "qwen_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "qwen_reasoning_model": "qwen3.5-plus",
+    "qwen_flash_model": "qwen3.5-flash",
+    "qwen_vl_model": "qwen3-vl-plus",
+    "qwen_embedding_model": "text-embedding-v4",
+    "qwen_embedding_dimensions": "1024",
+    "postgres_dsn": "postgresql://memos:memos@localhost:5432/memos",
+    "redis_url": "redis://localhost:6379/0",
+    "s3_endpoint_url": "http://localhost:9000",
+    "s3_access_key_id": "memos",
+    "s3_secret_access_key": "memos-password",
+    "s3_bucket": "memos-q",
+    "s3_region": "us-east-1",
+    "celery_broker_url": "redis://localhost:6379/1",
+    "celery_result_backend": "redis://localhost:6379/2",
+    "langfuse_public_key": "",
+    "langfuse_secret_key": "",
+    "langfuse_host": "https://cloud.langfuse.com",
+    "otel_exporter_otlp_endpoint": "http://otel-collector:4317",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -41,6 +68,9 @@ class Settings:
     qwen_reasoning_model: str = "qwen3.5-plus"
     qwen_flash_model: str = "qwen3.5-flash"
     qwen_vl_model: str = "qwen3-vl-plus"
+    qwen_embedding_model: str = "text-embedding-v4"
+    qwen_embedding_dimensions: int = 1024
+    qwen_require_live_embeddings: bool = False
 
     postgres_dsn: str = "postgresql://memos:memos@localhost:5432/memos"
     redis_url: str = "redis://localhost:6379/0"
@@ -64,30 +94,33 @@ class Settings:
 
         load_env_file(env_file)
         return cls(
-            environment=os.getenv("MEMOS_ENV", cls.environment),
-            api_base_url=os.getenv("API_BASE_URL", cls.api_base_url),
-            frontend_url=os.getenv("FRONTEND_URL", cls.frontend_url),
-            memos_store=os.getenv("MEMOS_STORE", cls.memos_store),
-            qwen_api_key=os.getenv("QWEN_API_KEY", cls.qwen_api_key),
-            qwen_base_url=os.getenv("QWEN_BASE_URL", cls.qwen_base_url),
-            qwen_reasoning_model=os.getenv("QWEN_REASONING_MODEL", cls.qwen_reasoning_model),
-            qwen_flash_model=os.getenv("QWEN_FLASH_MODEL", cls.qwen_flash_model),
-            qwen_vl_model=os.getenv("QWEN_VL_MODEL", cls.qwen_vl_model),
-            postgres_dsn=os.getenv("POSTGRES_DSN", cls.postgres_dsn),
-            redis_url=os.getenv("REDIS_URL", cls.redis_url),
-            s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", cls.s3_endpoint_url),
-            s3_access_key_id=os.getenv("S3_ACCESS_KEY_ID", cls.s3_access_key_id),
-            s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", cls.s3_secret_access_key),
-            s3_bucket=os.getenv("S3_BUCKET", cls.s3_bucket),
-            s3_region=os.getenv("S3_REGION", cls.s3_region),
-            celery_broker_url=os.getenv("CELERY_BROKER_URL", cls.celery_broker_url),
-            celery_result_backend=os.getenv("CELERY_RESULT_BACKEND", cls.celery_result_backend),
-            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY", cls.langfuse_public_key),
-            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY", cls.langfuse_secret_key),
-            langfuse_host=os.getenv("LANGFUSE_HOST", cls.langfuse_host),
+            environment=os.getenv("MEMOS_ENV", _DEFAULTS["environment"]),
+            api_base_url=os.getenv("API_BASE_URL", _DEFAULTS["api_base_url"]),
+            frontend_url=os.getenv("FRONTEND_URL", _DEFAULTS["frontend_url"]),
+            memos_store=os.getenv("MEMOS_STORE", _DEFAULTS["memos_store"]),
+            qwen_api_key=os.getenv("QWEN_API_KEY", _DEFAULTS["qwen_api_key"]),
+            qwen_base_url=os.getenv("QWEN_BASE_URL", _DEFAULTS["qwen_base_url"]),
+            qwen_reasoning_model=os.getenv("QWEN_REASONING_MODEL", _DEFAULTS["qwen_reasoning_model"]),
+            qwen_flash_model=os.getenv("QWEN_FLASH_MODEL", _DEFAULTS["qwen_flash_model"]),
+            qwen_vl_model=os.getenv("QWEN_VL_MODEL", _DEFAULTS["qwen_vl_model"]),
+            qwen_embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", _DEFAULTS["qwen_embedding_model"]),
+            qwen_embedding_dimensions=int(os.getenv("QWEN_EMBEDDING_DIMENSIONS", _DEFAULTS["qwen_embedding_dimensions"])),
+            qwen_require_live_embeddings=os.getenv("QWEN_REQUIRE_LIVE_EMBEDDINGS", "false").lower() == "true",
+            postgres_dsn=os.getenv("POSTGRES_DSN", _DEFAULTS["postgres_dsn"]),
+            redis_url=os.getenv("REDIS_URL", _DEFAULTS["redis_url"]),
+            s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", _DEFAULTS["s3_endpoint_url"]),
+            s3_access_key_id=os.getenv("S3_ACCESS_KEY_ID", _DEFAULTS["s3_access_key_id"]),
+            s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", _DEFAULTS["s3_secret_access_key"]),
+            s3_bucket=os.getenv("S3_BUCKET", _DEFAULTS["s3_bucket"]),
+            s3_region=os.getenv("S3_REGION", _DEFAULTS["s3_region"]),
+            celery_broker_url=os.getenv("CELERY_BROKER_URL", _DEFAULTS["celery_broker_url"]),
+            celery_result_backend=os.getenv("CELERY_RESULT_BACKEND", _DEFAULTS["celery_result_backend"]),
+            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY", _DEFAULTS["langfuse_public_key"]),
+            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY", _DEFAULTS["langfuse_secret_key"]),
+            langfuse_host=os.getenv("LANGFUSE_HOST", _DEFAULTS["langfuse_host"]),
             otel_exporter_otlp_endpoint=os.getenv(
                 "OTEL_EXPORTER_OTLP_ENDPOINT",
-                cls.otel_exporter_otlp_endpoint,
+                _DEFAULTS["otel_exporter_otlp_endpoint"],
             ),
         )
 

@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 
 from .models import AuditEvent, Memory, MemoryEdge, MemoryStatus, RelationType, utc_now
+from .scoring import cosine_similarity
 
 
 class InMemoryStore:
@@ -57,6 +58,16 @@ class InMemoryStore:
             key=lambda item: item.created_at,
         )
 
+    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[Memory]:
+        """Return nearest memories for a user using stored embedding vectors."""
+
+        candidates = [memory for memory in self.list_memories(user_id) if memory.embedding]
+        return sorted(
+            candidates,
+            key=lambda memory: cosine_similarity(query_embedding, memory.embedding),
+            reverse=True,
+        )[:limit]
+
     def add_edge(self, edge: MemoryEdge) -> MemoryEdge:
         self._edges[edge.id] = edge
         self.record_audit(
@@ -81,6 +92,11 @@ class InMemoryStore:
         if relation_type is None:
             return edges
         return [edge for edge in edges if edge.relation_type == relation_type]
+
+    def list_user_ids(self) -> list[str]:
+        """Return user ids with at least one memory."""
+
+        return sorted(self._by_user)
 
     def audit_log(self, memory_id: str | None = None) -> list[AuditEvent]:
         if memory_id is None:
@@ -126,6 +142,8 @@ def memory_snapshot(memory: Memory) -> dict[str, object]:
         "importance_score": memory.importance_score,
         "novelty_score": memory.novelty_score,
         "stability_score": memory.stability_score,
+        "confidence_reasons": list(memory.confidence_reasons),
+        "embedding_dimensions": len(memory.embedding or []),
         "status": memory.status.value,
         "version": memory.version,
         "tags": sorted(memory.tags),

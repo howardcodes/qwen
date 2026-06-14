@@ -23,6 +23,7 @@ const edges: Edge[] = [
 
 export default function Home() {
   const [status, setStatus] = useState<IntegrationStatus | null>(null)
+  const [userId, setUserId] = useState('demo-user')
   const [message, setMessage] = useState('What do you remember about me?')
   const [response, setResponse] = useState('')
   const [error, setError] = useState('')
@@ -37,10 +38,10 @@ export default function Home() {
     return [
       ['FastAPI', status.backend.fastapi],
       ['Qwen API key', status.models.qwen_api_key_configured],
-      ['Qwen-Agent', status.backend.qwen_agent_available],
+      ['Qwen-Agent', Boolean(status.backend.qwen_agent_available)],
       ['PostgreSQL/pgvector', status.storage.postgres_dsn_configured],
-      ['Redis/Celery', status.jobs.celery_broker_url_configured],
-      ['Langfuse', status.monitoring.langfuse_configured]
+      ['Redis/Celery', Boolean(status.jobs?.celery_broker_url_configured)],
+      ['Langfuse', Boolean(status.monitoring?.langfuse_configured)]
     ]
   }, [status])
 
@@ -48,14 +49,14 @@ export default function Home() {
     setLoading(true)
     setError('')
     try {
-      const result = await sendAgentMessage('demo-user', message)
+      const result = await sendAgentMessage(userId, message)
       setResponse(result.response)
     } catch (err) {
       setError(String(err))
     } finally {
       setLoading(false)
     }
-  }, [message])
+  }, [message, userId])
 
   return (
     <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-8 px-6 py-8">
@@ -91,6 +92,13 @@ export default function Home() {
         </Card>
         <Card>
           <h2 className="mb-3 text-xl font-bold">Live Qwen-Agent chat</h2>
+          <label className="mb-2 block text-sm font-semibold text-slate-300">Authenticated user ID</label>
+          <input
+            className="mb-4 w-full rounded-xl border border-white/10 bg-black/30 p-3 outline-none focus:border-accent"
+            value={userId}
+            onChange={(event) => setUserId(event.target.value)}
+          />
+          <label className="mb-2 block text-sm font-semibold text-slate-300">Message</label>
           <textarea
             className="min-h-32 w-full rounded-xl border border-white/10 bg-black/30 p-4 outline-none focus:border-accent"
             value={message}

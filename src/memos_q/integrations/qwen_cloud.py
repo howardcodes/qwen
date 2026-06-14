@@ -26,7 +26,7 @@ class QwenMessage:
 
 
 class QwenCloudClient:
-    """HTTP client for Qwen3.5, Qwen3-VL, and Qwen Batch API calls."""
+    """HTTP client for Qwen chat, vision, batch, and Alibaba embeddings."""
 
     def __init__(self, config: Settings = settings) -> None:
         self.config = config
@@ -48,6 +48,37 @@ class QwenCloudClient:
         }
         data = self._post("/chat/completions", payload)
         return data["choices"][0]["message"]["content"]
+
+    def embed_texts(
+        self,
+        texts: Sequence[str],
+        *,
+        model: str | None = None,
+        dimensions: int | None = None,
+    ) -> list[list[float]]:
+        """Embed text through Alibaba Cloud Model Studio's OpenAI-compatible endpoint.
+
+        DashScope documents ``POST /embeddings`` for ``text-embedding-v4`` and
+        allows dimensions including 64 through 2,048. The method keeps input
+        ordering and returns one vector per input string.
+        """
+
+        if not texts:
+            return []
+        payload = {
+            "model": model or self.config.qwen_embedding_model,
+            "input": list(texts),
+            "dimensions": dimensions or self.config.qwen_embedding_dimensions,
+            "encoding_format": "float",
+        }
+        data = self._post("/embeddings", payload)
+        vectors_by_index = {item["index"]: item["embedding"] for item in data["data"]}
+        return [list(map(float, vectors_by_index[index])) for index in range(len(texts))]
+
+    def embed_text(self, text: str, *, model: str | None = None, dimensions: int | None = None) -> list[float]:
+        """Embed one text string through Alibaba Cloud Model Studio."""
+
+        return self.embed_texts([text], model=model, dimensions=dimensions)[0]
 
     def flash_classify(self, prompt: str, *, labels: Iterable[str]) -> str:
         """Classify or route text with the configured Qwen3.5-Flash model."""
