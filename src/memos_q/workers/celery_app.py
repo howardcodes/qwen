@@ -6,6 +6,7 @@ from celery import Celery
 
 from memos_q.config import settings
 from memos_q.engine import MemoryOS
+from memos_q.integrations.factory import build_memory_store
 from memos_q.integrations.qwen_cloud import QwenCloudClient, QwenMessage
 
 celery_app = Celery(
@@ -27,7 +28,7 @@ celery_app.conf.update(
     },
 )
 
-_memory_os = MemoryOS()
+_memory_os = MemoryOS(build_memory_store())
 _qwen = QwenCloudClient()
 
 

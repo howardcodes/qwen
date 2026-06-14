@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -14,11 +15,22 @@ from memos_q.store import memory_snapshot
 class PostgresMemoryStore:
     """PostgreSQL + pgvector persistence adapter for MemOS-Q memories."""
 
-    def __init__(self, config: Settings = settings) -> None:
+    def __init__(self, config: Settings = settings, *, connect_retries: int = 30, retry_delay: float = 2.0) -> None:
         import psycopg
 
         self.config = config
-        self.connection = psycopg.connect(config.postgres_dsn)
+        last_error: Exception | None = None
+        for attempt in range(1, connect_retries + 1):
+            try:
+                self.connection = psycopg.connect(config.postgres_dsn)
+                break
+            except psycopg.OperationalError as error:
+                last_error = error
+                if attempt == connect_retries:
+                    raise
+                time.sleep(retry_delay)
+        else:  # pragma: no cover - defensive; loop either breaks or raises
+            raise RuntimeError("PostgreSQL connection was not initialized") from last_error
 
     def migrate(self) -> None:
         """Create required tables and pgvector extension if missing."""

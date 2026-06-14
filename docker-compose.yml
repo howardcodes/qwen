@@ -4,51 +4,82 @@ services:
       context: .
       dockerfile: Dockerfile.api
     env_file: .env
+    restart: unless-stopped
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
-      - redis
-      - minio
-      - otel-collector
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
     env_file: .env
+    restart: unless-stopped
     depends_on:
-      - api
-      - redis
-      - postgres
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     env_file: .env
+    restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
   postgres:
     image: pgvector/pgvector:pg16
     env_file: .env
+    restart: unless-stopped
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-memos} -d $${POSTGRES_DB:-memos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     command: server /data --console-address ":9001"
     env_file: .env
+    restart: unless-stopped
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -57,26 +88,31 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.55.1
+    restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
   grafana:
     image: grafana/grafana:11.4.0
+    restart: unless-stopped
     ports:
       - "3001:3000"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1
     command: ["--config=/etc/otel-collector-config.yml"]
+    restart: unless-stopped
     volumes:
       - ./monitoring/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
     ports:

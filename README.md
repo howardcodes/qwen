@@ -79,13 +79,19 @@ Open the services:
 Useful Docker commands:
 
 ```bash
+# Check whether the API container is running and healthy.
+docker compose ps api
+
+# Follow API startup logs if localhost:8000 refuses connections.
+docker compose logs -f api
+
 # Rebuild only the API after backend edits.
 docker compose up --build api
 
 # Run the Celery worker with the rest of the stack.
 docker compose up --build worker
 
-# View logs.
+# View app logs.
 docker compose logs -f api worker frontend
 
 # Stop services but keep volumes.
@@ -94,6 +100,8 @@ docker compose down
 # Stop services and remove Postgres/MinIO/Grafana volumes.
 docker compose down -v
 ```
+
+The API service waits for healthy PostgreSQL and Redis containers before it starts, and the frontend waits for the API health check before starting. If the browser reports `POST http://localhost:8000/agent/chat net::ERR_CONNECTION_REFUSED`, the API container is not reachable; run `docker compose ps api` and `docker compose logs -f api` first.
 
 ## Run the Backend Locally
 
@@ -311,9 +319,11 @@ for item in results:
 ## Troubleshooting
 
 - If `docker compose` fails because `.env` is missing, run `cp .env.example .env` first.
+- If `localhost:3000` shows `POST http://localhost:8000/agent/chat net::ERR_CONNECTION_REFUSED`, the FastAPI container is down or unhealthy. Run `docker compose ps api` and `docker compose logs -f api`, then rebuild with `docker compose up --build api`.
 - If the API starts locally but tries to connect to Postgres, set `MEMOS_STORE=memory` in `.env`.
 - If `/agent/chat` fails with `QWEN_API_KEY is required`, add a real QwenCloud key to `.env`.
 - If frontend requests fail, confirm `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000` and that FastAPI is running.
+- If Grafana logs `stat /var/lib/grafana/dashboards: no such file or directory`, rebuild with the latest compose file; it mounts `./monitoring/grafana/dashboards` into that path.
 - If npm install fails with a registry `403`, fix npm registry/auth settings and rerun `npm install` inside `frontend/`.
 
 ## Built for Qwen Code Challenge
