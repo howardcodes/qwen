@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@import 'reactflow/dist/style.css';
+
+html,
+body,
+#__next {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-background text-foreground;
+}
