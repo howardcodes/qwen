@@ -1,4 +1,7 @@
-"""FastAPI service for MemOS-Q."""
+"""FastAPI backend service for MemOS-Q.
+- defines the HTTP endpoints frontend/client calls
+
+"""
 
 from __future__ import annotations
 

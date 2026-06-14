@@ -1,4 +1,14 @@
-"""Core memory operating system implementation."""
+"""Core memory operating system implementation.
+
+- MemoryOS manages memories for an AI agent:
+    - remember(): create a new memory with quality scoring and conflict resolution
+    - recall(): retrieve relevant memories with explainable scoring signals
+    - forget(): mark a memory as forgotten while retaining audit history
+    - inspect(): list a user's memories for transparency controls
+    - maintenance(): run autonomous memory maintenance to merge duplicates, promote stable facts, decay low-stability memories, and archive stale memories
+
+
+"""
 
 from __future__ import annotations
 
@@ -24,7 +34,7 @@ class MemoryOS:
     """Self-correcting memory manager for AI agents."""
 
     def __init__(self, store: InMemoryStore | None = None) -> None:
-        self.store = store or InMemoryStore()
+        self.store = store or InMemoryStore() # KIV In production, this would be a persistent database-backed store
 
     def remember(
         self,
@@ -44,7 +54,7 @@ class MemoryOS:
         """Create a memory and resolve obvious conflicts."""
 
         existing = self.store.list_memories(user_id)
-        scores = quality_scores(content, existing)
+        scores = quality_scores(content, existing) # KIV In production, this would be a more sophisticated scoring function possibly involving ML models
         memory = Memory(
             user_id=user_id,
             content=content,
@@ -58,7 +68,7 @@ class MemoryOS:
             metadata=dict(metadata or {}),
         )
         self.store.add_memory(memory, actor=actor)
-        self._resolve_conflicts(memory, existing)
+        self._resolve_conflicts(memory, existing) # KIV This is a simple heuristic conflict resolution. In production, this could be more complex and involve human-in-the-loop review for certain cases.
         return memory
 
     def recall(
@@ -73,7 +83,7 @@ class MemoryOS:
 
         results: list[RecallResult] = []
         for memory in self.store.list_memories(user_id):
-            score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags)
+            score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags) # KIV In production, this would be a more sophisticated retrieval function possibly involving vector search and ML models
             if score <= 0:
                 continue
             memory.last_recalled_at = utc_now()
@@ -90,7 +100,7 @@ class MemoryOS:
                     ),
                 )
             )
-        return sorted(results, key=lambda item: item.score, reverse=True)[:limit]
+        return sorted(results, key=lambda item: item.score, reverse=True)[:limit] # most relevant memories at the top
 
     def forget(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
         """Mark a memory as forgotten while retaining audit history."""
@@ -124,6 +134,8 @@ class MemoryOS:
                 continue
             if keyword_score(new_memory.content, old_memory) > 0.85:
                 continue
+
+            # relationships between memories
             if new_memory.confidence_score >= old_memory.confidence_score:
                 self.store.update_memory(
                     old_memory.id,
@@ -164,6 +176,7 @@ class MemoryOS:
         by_signature: dict[tuple[str, ...], list[Memory]] = defaultdict(list)
         for memory in memories:
             by_signature[tuple(sorted(tokenize(memory.content)))].append(memory)
+        # This is a simple heuristic for finding duplicates based on token overlap. In production, this could be more sophisticated and involve ML models to identify paraphrased duplicates or related facts.
         for duplicates in by_signature.values():
             if len(duplicates) < 2:
                 continue

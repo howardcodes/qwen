@@ -20,7 +20,7 @@ def tokenize(text: str) -> set[str]:
 
 def keyword_score(query: str, memory: Memory) -> float:
     """Return token overlap between a query and a memory."""
-
+    # To improve: this is a very basic keyword matching score. In production, this could be enhanced with synonym expansion, stemming, or replaced entirely with embedding-based similarity.
     query_tokens = tokenize(query)
     memory_tokens = tokenize(memory.content) | memory.tags
     if not query_tokens or not memory_tokens:
