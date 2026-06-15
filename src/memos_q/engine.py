@@ -27,7 +27,7 @@ from .models import (
     clamp_score,
     utc_now,
 )
-from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, local_embedding, quality_scores, tokenize
+from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, quality_scores, tokenize
 from .store import InMemoryStore
 
 
@@ -162,13 +162,16 @@ class MemoryOS:
         return {"merged": merged, "promoted": promoted, "decayed": decayed, "archived": archived}
 
     def _embed_text(self, text: str) -> list[float]:
-        if self.embedding_provider is not None:
-            try:
-                return self.embedding_provider.embed_text(text)
-            except Exception:
-                if self.require_live_embeddings:
-                    raise
-        return local_embedding(text, dimensions=self.fallback_embedding_dimensions)
+        """Embed text through the configured Qwen/Alibaba embedding provider."""
+
+        if self.embedding_provider is None:
+            raise RuntimeError("A Qwen embedding provider is required; local embeddings are disabled")
+        try:
+            return self.embedding_provider.embed_text(text)
+        except Exception:
+            if self.require_live_embeddings:
+                raise
+            raise RuntimeError("Qwen embedding provider failed and local embeddings are disabled")
 
     def _resolve_conflicts(self, new_memory: Memory, existing: list[Memory]) -> None:
         new_subject = _subject_key(new_memory.content)

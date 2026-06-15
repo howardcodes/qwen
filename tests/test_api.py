@@ -8,8 +8,19 @@ from memos_q.api import app, memory_os
 from memos_q.store import InMemoryStore
 
 
+class TestEmbeddingProvider:
+    def embed_text(self, text: str) -> list[float]:
+        if "Rust" in text:
+            return [0.0, 1.0]
+        return [1.0, 0.0]
+
+    def embed_texts(self, texts):
+        return [self.embed_text(text) for text in texts]
+
+
 def setup_function():
     memory_os.store = InMemoryStore()
+    memory_os.embedding_provider = TestEmbeddingProvider()
 
 
 def test_memories_requires_auth_and_uses_header_user():

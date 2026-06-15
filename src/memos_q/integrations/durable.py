@@ -36,7 +36,10 @@ class PostgresMemoryStore:
         """Create required tables and pgvector extension if missing."""
 
         with self.connection.cursor() as cursor:
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            use_pgvector = self.config.memos_store.lower() == "postgres"
+            if use_pgvector:
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            embedding_type = f"vector({self.config.qwen_embedding_dimensions})" if use_pgvector else "JSONB"
             cursor.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS memories (
@@ -44,7 +47,7 @@ class PostgresMemoryStore:
                     user_id TEXT NOT NULL,
                     memory_type TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    embedding vector({self.config.qwen_embedding_dimensions}),
+                    embedding {embedding_type},
                     confidence_score DOUBLE PRECISION NOT NULL,
                     importance_score DOUBLE PRECISION NOT NULL,
                     novelty_score DOUBLE PRECISION NOT NULL,
@@ -91,7 +94,8 @@ class PostgresMemoryStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_memory_type ON memories(memory_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING gin(tags)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
+            if use_pgvector:
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
         self.connection.commit()
 
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
@@ -126,7 +130,7 @@ class PostgresMemoryStore:
                     memory.updated_at,
                     memory.last_recalled_at,
                     memory.expires_at,
-                    memory.embedding,
+                    json.dumps(memory.embedding) if self.config.memos_store.lower() == "alicloud" else memory.embedding,
                 ),
             )
             self._record_audit(cursor, "remember", actor, memory.id, None, memory_snapshot(memory))
@@ -189,7 +193,7 @@ class PostgresMemoryStore:
                     memory.updated_at,
                     memory.last_recalled_at,
                     memory.expires_at,
-                    memory.embedding,
+                    json.dumps(memory.embedding) if self.config.memos_store.lower() == "alicloud" else memory.embedding,
                     memory.id,
                 ),
             )
@@ -340,6 +344,127 @@ class PostgresMemoryStore:
         )
 
 
+class OpenSearchVectorIndex:
+    """Alibaba Cloud OpenSearch Vector Engine adapter for memory embeddings.
+
+    RDS remains the source of truth for memory records; this adapter stores and
+    searches only the vector document needed for cosine-similarity recall.
+    """
+
+    def __init__(self, config: Settings = settings) -> None:
+        import requests
+
+        self.config = config
+        self.session = requests.Session()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.config.opensearch_endpoint and self.config.opensearch_username and self.config.opensearch_password)
+
+    def upsert_memory(self, memory: Memory) -> None:
+        """Index one memory vector in OpenSearch Vector Engine."""
+
+        if not self.enabled:
+            raise RuntimeError("OpenSearch Vector Engine credentials are required")
+        if not memory.embedding:
+            raise ValueError("memory embedding is required before vector indexing")
+        payload = {
+            "id": memory.id,
+            "user_id": memory.user_id,
+            "status": memory.status.value,
+            "content": memory.content,
+            self.config.opensearch_vector_field: memory.embedding,
+            "updated_at": memory.updated_at.isoformat(),
+        }
+        self._request("PUT", f"/{self.config.opensearch_index}/_doc/{memory.id}", json=payload)
+
+    def update_memory_status(self, memory: Memory) -> None:
+        """Update vector metadata after lifecycle changes."""
+
+        if not self.enabled:
+            raise RuntimeError("OpenSearch Vector Engine credentials are required")
+        self._request(
+            "POST",
+            f"/{self.config.opensearch_index}/_update/{memory.id}",
+            json={"doc": {"status": memory.status.value, "updated_at": memory.updated_at.isoformat()}},
+        )
+
+    def search_memory_ids(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[str]:
+        """Return memory ids ranked by OpenSearch cosine vector similarity."""
+
+        if not self.enabled:
+            raise RuntimeError("OpenSearch Vector Engine credentials are required")
+        payload = {
+            "size": limit,
+            "query": {
+                "bool": {
+                    "filter": [{"term": {"user_id": user_id}}, {"term": {"status": MemoryStatus.ACTIVE.value}}],
+                    "must": [
+                        {
+                            "knn": {
+                                self.config.opensearch_vector_field: {
+                                    "vector": query_embedding,
+                                    "k": limit,
+                                }
+                            }
+                        }
+                    ],
+                }
+            },
+        }
+        data = self._request("POST", f"/{self.config.opensearch_index}/_search", json=payload)
+        return [hit["_id"] for hit in data.get("hits", {}).get("hits", [])]
+
+    def _request(self, method: str, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
+        response = self.session.request(
+            method,
+            self.config.opensearch_endpoint.rstrip("/") + path,
+            auth=(self.config.opensearch_username, self.config.opensearch_password),
+            headers={"Content-Type": "application/json"},
+            json=json,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+
+class AliCloudMemoryStore:
+    """Production store: RDS for records plus OpenSearch Vector Engine for recall."""
+
+    def __init__(self, config: Settings = settings) -> None:
+        self.records = PostgresMemoryStore(config)
+        self.vectors = OpenSearchVectorIndex(config)
+
+    def migrate(self) -> None:
+        self.records.migrate()
+
+    def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
+        saved = self.records.add_memory(memory, actor=actor)
+        self.vectors.upsert_memory(saved)
+        return saved
+
+    def update_memory(self, memory_id: str, *, actor: str = "memory-agent", **changes: object) -> Memory:
+        updated = self.records.update_memory(memory_id, actor=actor, **changes)
+        if updated.embedding:
+            self.vectors.upsert_memory(updated)
+        else:
+            self.vectors.update_memory_status(updated)
+        return updated
+
+    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[Memory]:
+        ids = self.vectors.search_memory_ids(user_id, query_embedding, limit=limit)
+        memories = []
+        for memory_id in ids:
+            try:
+                memories.append(self.records.get_memory(memory_id))
+            except KeyError:
+                continue
+        return memories
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.records, name)
+
+
 class RedisMemoryCache:
     """Redis cache for hot recall results and session state."""
 
@@ -416,6 +541,8 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         metadata = json.loads(metadata)
     if isinstance(confidence_reasons, str):
         confidence_reasons = json.loads(confidence_reasons)
+    if isinstance(embedding, str):
+        embedding = json.loads(embedding)
     return Memory(
         id=memory_id,
         user_id=user_id,
