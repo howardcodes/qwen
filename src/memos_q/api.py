@@ -180,7 +180,24 @@ async def ingest_vision(request: VisionIngestRequest, user_id: str = Depends(aut
 
 @app.get("/integrations/status")
 async def integrations_status() -> dict[str, Any]:
-    return {"frontend": {"nextjs_url": settings.frontend_url}, "backend": {"fastapi": True}, "storage": {"postgres_dsn_configured": bool(settings.postgres_dsn), "redis_url_configured": bool(settings.redis_url)}, "models": {"qwen_api_key_configured": bool(settings.qwen_api_key), "base_url": settings.qwen_base_url, "embedding_model": settings.qwen_embedding_model, "embedding_dimensions": settings.qwen_embedding_dimensions}}
+    return {
+        "frontend": {"nextjs_url": settings.frontend_url},
+        "backend": {"fastapi": True, "target": "Alibaba Cloud ECS"},
+        "storage": {
+            "mode": settings.memos_store,
+            "rds_postgres_configured": bool(settings.postgres_dsn),
+            "redis_url_configured": bool(settings.redis_url),
+            "opensearch_vector_engine_configured": bool(settings.opensearch_endpoint),
+            "opensearch_index": settings.opensearch_index,
+        },
+        "models": {
+            "qwen_api_key_configured": bool(settings.qwen_api_key),
+            "base_url": settings.qwen_base_url,
+            "embedding_model": settings.qwen_embedding_model,
+            "embedding_dimensions": settings.qwen_embedding_dimensions,
+            "live_embeddings_required": settings.qwen_require_live_embeddings,
+        },
+    }
 
 
 @app.get("/users/me/memories")

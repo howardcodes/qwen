@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from collections.abc import Iterable
@@ -11,7 +10,6 @@ from datetime import datetime
 from .models import Memory, clamp_score, utc_now
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
-EMBEDDING_DIMENSIONS = 64
 
 
 def tokenize(text: str) -> set[str]:
@@ -20,21 +18,6 @@ def tokenize(text: str) -> set[str]:
     return set(TOKEN_RE.findall(text.lower()))
 
 
-def local_embedding(text: str, *, dimensions: int = EMBEDDING_DIMENSIONS) -> list[float]:
-    """Create a deterministic hashed embedding for local tests and offline use.
-
-    Production deployments can replace this with Alibaba Cloud/Qwen embeddings
-    while preserving the same vector-search flow.
-    """
-
-    vector = [0.0] * dimensions
-    for token in TOKEN_RE.findall(text.lower()):
-        digest = hashlib.sha256(token.encode()).digest()
-        index = int.from_bytes(digest[:4], "big") % dimensions
-        sign = 1.0 if digest[4] % 2 == 0 else -1.0
-        vector[index] += sign
-    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-    return [value / norm for value in vector]
 
 
 def cosine_similarity(left: list[float] | None, right: list[float] | None) -> float:
@@ -57,10 +40,12 @@ def keyword_score(query: str, memory: Memory) -> float:
 
 
 def semantic_score(query: str, memory: Memory, query_embedding: list[float] | None = None) -> float:
-    """Return embedding similarity with a token-similarity fallback."""
+    """Return Qwen embedding cosine similarity with keyword explainability only.
 
-    if query_embedding is None and memory.embedding:
-        query_embedding = local_embedding(query, dimensions=len(memory.embedding))
+    Query embeddings must be supplied by the caller so production recall cannot
+    silently downgrade to local or hardcoded embeddings.
+    """
+
     vector_score = cosine_similarity(query_embedding, memory.embedding)
     query_tokens = tokenize(query)
     memory_tokens = tokenize(memory.content)
@@ -95,8 +80,6 @@ def hybrid_retrieval_score(
 ) -> tuple[float, dict[str, float]]:
     """Compute weighted vector/keyword retrieval score and individual signals."""
 
-    if query_embedding is None and memory.embedding:
-        query_embedding = local_embedding(query, dimensions=len(memory.embedding))
     signals = {
         "vector": cosine_similarity(query_embedding, memory.embedding),
         "semantic": semantic_score(query, memory, query_embedding=query_embedding),

@@ -13,7 +13,7 @@ This repository includes runnable integration points for the requested stack. Co
 | Frontend | Next.js 12, Tailwind CSS, shadcn/ui-style components, React Flow | `frontend/` dashboard with integration status, memory architecture graph, and live agent chat. |
 | Backend | FastAPI, Qwen-Agent | FastAPI app with memory endpoints, QwenCloud chat, Qwen-Agent endpoint, Qwen3-VL ingestion, and integration status. |
 | Models | Qwen3.5-Plus, Qwen3.5-Flash, Qwen3-VL-Plus, Qwen Batch API | `QwenCloudClient` calls DashScope/OpenAI-compatible endpoints for reasoning, flash classification, vision extraction, and batch creation. |
-| Storage | PostgreSQL, pgvector, Redis, S3-compatible object storage | PostgreSQL/pgvector adapter, Redis cache helper, and S3/MinIO object helper. Docker Compose runs the backing services. |
+| Storage | Alibaba Cloud RDS PostgreSQL, OpenSearch Vector Engine, Redis, S3-compatible object storage | RDS/PostgreSQL memory-record adapter, OpenSearch Vector Engine cosine vector recall, Redis cache helper, and S3/OSS object helper. Docker Compose remains available for local service smoke tests. |
 | Background jobs | Celery | Celery worker for compaction and Qwen-powered session summarization. |
 | Monitoring | Langfuse, OpenTelemetry, Prometheus, Grafana | Langfuse trace decorator, FastAPI OpenTelemetry wiring, `/metrics`, Prometheus scrape config, and Grafana provisioning. |
 | Deployment | Docker | API, worker, frontend, Postgres/pgvector, Redis, MinIO, Prometheus, Grafana, and OTel Collector Compose stack. |
@@ -43,21 +43,30 @@ QWEN_API_KEY=replace-with-your-qwen-api-key
 QWEN_EMBEDDING_MODEL=text-embedding-v4
 QWEN_EMBEDDING_DIMENSIONS=1024
 # Set true in production to fail closed if Alibaba/Qwen embedding calls fail.
-QWEN_REQUIRE_LIVE_EMBEDDINGS=false
+QWEN_REQUIRE_LIVE_EMBEDDINGS=true
 LANGFUSE_PUBLIC_KEY=replace-with-langfuse-public-key
 LANGFUSE_SECRET_KEY=replace-with-langfuse-secret-key
-POSTGRES_PASSWORD=memos
-S3_ACCESS_KEY_ID=memos
-S3_SECRET_ACCESS_KEY=memos-password
+POSTGRES_DSN=postgresql://memos:replace-with-rds-password@rm-xxxx.pg.rds.aliyuncs.com:5432/memos
+OPENSEARCH_ENDPOINT=https://opensearch-xxxx.aliyuncs.com
+OPENSEARCH_USERNAME=replace-with-opensearch-username
+OPENSEARCH_PASSWORD=replace-with-opensearch-password
+S3_ACCESS_KEY_ID=replace-with-oss-access-key-id
+S3_SECRET_ACCESS_KEY=replace-with-oss-secret-access-key
 ```
 
 Use these storage modes:
 
 ```bash
-# Local in-memory store, easiest for backend development and tests.
+# Production on Alibaba Cloud: ECS runs the API/worker, RDS stores memory
+# records/audit history, Qwen Embedding creates vectors, and OpenSearch Vector
+# Engine searches those vectors with cosine similarity.
+MEMOS_STORE=alicloud
+QWEN_REQUIRE_LIVE_EMBEDDINGS=true
+
+# Development/test-only in-memory store. Do not use for production.
 MEMOS_STORE=memory
 
-# Durable PostgreSQL + pgvector store, used by Docker Compose by default.
+# Development-only PostgreSQL store without OpenSearch Vector Engine.
 MEMOS_STORE=postgres
 ```
 

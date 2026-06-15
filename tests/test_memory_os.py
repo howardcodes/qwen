@@ -2,8 +2,28 @@ from memos_q import MemoryOS
 from memos_q.models import MemoryStatus, MemoryType, RelationType
 
 
+class RecordingEmbeddingProvider:
+    def __init__(self):
+        self.texts = []
+
+    def embed_text(self, text: str) -> list[float]:
+        self.texts.append(text)
+        if "Python" in text or "concise" in text or "MacBook" in text or "ThinkPad" in text or "hackathon" in text:
+            return [1.0, 0.0]
+        if "Rust" in text:
+            return [0.0, 1.0]
+        return [1.0, 0.0]
+
+    def embed_texts(self, texts):
+        return [self.embed_text(text) for text in texts]
+
+
+def build_memory_os() -> MemoryOS:
+    return MemoryOS(embedding_provider=RecordingEmbeddingProvider(), fallback_embedding_dimensions=2)
+
+
 def test_recall_returns_explainable_ranking():
-    memory_os = MemoryOS()
+    memory_os = build_memory_os()
     memory_os.remember(
         user_id="user-1",
         content="User prefers concise responses when discussing AI agents.",
@@ -24,7 +44,7 @@ def test_recall_returns_explainable_ranking():
 
 
 def test_newer_confident_memory_supersedes_conflicting_memory():
-    memory_os = MemoryOS()
+    memory_os = build_memory_os()
     old = memory_os.remember(
         user_id="user-1",
         content="User uses MacBook M3.",
@@ -48,7 +68,7 @@ def test_newer_confident_memory_supersedes_conflicting_memory():
 
 
 def test_maintenance_merges_duplicates_and_promotes_stable_facts():
-    memory_os = MemoryOS()
+    memory_os = build_memory_os()
     first = memory_os.remember(
         user_id="user-1",
         content="User prefers Python for AI agents.",
@@ -75,7 +95,7 @@ def test_maintenance_merges_duplicates_and_promotes_stable_facts():
 
 
 def test_forget_keeps_audit_history():
-    memory_os = MemoryOS()
+    memory_os = build_memory_os()
     memory = memory_os.remember(
         user_id="user-1",
         content="User is preparing for a hackathon.",
@@ -86,23 +106,6 @@ def test_forget_keeps_audit_history():
 
     assert memory_os.inspect("user-1") == []
     assert any(event.action == "update" for event in memory_os.store.audit_log(memory.id))
-
-
-class RecordingEmbeddingProvider:
-    def __init__(self):
-        self.texts = []
-
-    def embed_text(self, text: str) -> list[float]:
-        self.texts.append(text)
-        if "Python" in text:
-            return [1.0, 0.0]
-        if "Rust" in text:
-            return [0.0, 1.0]
-        return [1.0, 0.0]
-
-    def embed_texts(self, texts):
-        return [self.embed_text(text) for text in texts]
-
 
 def test_memory_os_uses_embedding_provider_for_remember_and_recall():
     provider = RecordingEmbeddingProvider()
