@@ -185,10 +185,14 @@ async def integrations_status() -> dict[str, Any]:
         "backend": {"fastapi": True, "target": "Alibaba Cloud ECS"},
         "storage": {
             "mode": settings.memos_store,
-            "rds_postgres_configured": bool(settings.postgres_dsn),
+            "postgres_dsn_configured": bool(settings.postgres_dsn),
+            "postgres_on_ecs_configured": bool(settings.postgres_dsn),
             "redis_url_configured": bool(settings.redis_url),
-            "opensearch_vector_engine_configured": bool(settings.opensearch_endpoint),
-            "opensearch_index": settings.opensearch_index,
+            "minio_bucket": settings.s3_bucket,
+            "s3_bucket": settings.s3_bucket,
+            "pinecone_configured": bool(settings.pinecone_api_key and settings.pinecone_host),
+            "pinecone_index": settings.pinecone_index,
+            "pinecone_namespace": settings.pinecone_namespace,
         },
         "models": {
             "qwen_api_key_configured": bool(settings.qwen_api_key),

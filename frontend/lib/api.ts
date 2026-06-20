@@ -10,7 +10,7 @@ export type IntegrationStatus = {
     vision_model?: string
     base_url?: string
   }
-  storage: { postgres_dsn_configured: boolean; redis_url_configured: boolean; s3_bucket?: string }
+  storage: { postgres_dsn_configured: boolean; redis_url_configured: boolean; s3_bucket?: string; pinecone_configured?: boolean }
   jobs?: { celery_broker_url_configured: boolean }
   monitoring?: { langfuse_configured: boolean; otel_endpoint: string; prometheus_metrics_path: string }
 }
