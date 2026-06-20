@@ -13,10 +13,22 @@ This repository includes runnable integration points for the requested stack. Co
 | Frontend | Next.js 12, Tailwind CSS, shadcn/ui-style components, React Flow | `frontend/` dashboard with integration status, memory architecture graph, and live agent chat. |
 | Backend | FastAPI, Qwen-Agent | FastAPI app with memory endpoints, QwenCloud chat, Qwen-Agent endpoint, Qwen3-VL ingestion, and integration status. |
 | Models | Qwen3.5-Plus, Qwen3.5-Flash, Qwen3-VL-Plus, Qwen Batch API | `QwenCloudClient` calls DashScope/OpenAI-compatible endpoints for reasoning, flash classification, vision extraction, and batch creation. |
-| Storage | Alibaba Cloud RDS PostgreSQL, OpenSearch Vector Engine, Redis, S3-compatible object storage | RDS/PostgreSQL memory-record adapter, OpenSearch Vector Engine cosine vector recall, Redis cache helper, and S3/OSS object helper. Docker Compose remains available for local service smoke tests. |
+| Storage | Postgres on ECS, Pinecone, Redis on ECS, MinIO on ECS | Postgres memory-record adapter, Pinecone cosine vector recall for Qwen/DashScope embeddings, Redis cache helper, and MinIO/S3 object helper. Docker Compose remains available for local service smoke tests. |
 | Background jobs | Celery | Celery worker for compaction and Qwen-powered session summarization. |
 | Monitoring | Langfuse, OpenTelemetry, Prometheus, Grafana | Langfuse trace decorator, FastAPI OpenTelemetry wiring, `/metrics`, Prometheus scrape config, and Grafana provisioning. |
-| Deployment | Docker | API, worker, frontend, Postgres/pgvector, Redis, MinIO, Prometheus, Grafana, and OTel Collector Compose stack. |
+| Deployment | Alibaba ECS + Docker | API, worker, frontend, Postgres, Redis, MinIO, Prometheus, Grafana, and OTel Collector run on Alibaba ECS; Pinecone remains managed externally. |
+
+## Recommended Project Architecture
+
+| Component | Recommended |
+| --- | --- |
+| Compute | Alibaba ECS |
+| LLM + embeddings | Qwen / DashScope |
+| Vector DB | Pinecone |
+| Memory records | Postgres on ECS |
+| Queue/cache | Redis on ECS |
+| File storage | MinIO on ECS |
+| Observability | no change |
 
 ## Prerequisites
 
@@ -46,27 +58,27 @@ QWEN_EMBEDDING_DIMENSIONS=1024
 QWEN_REQUIRE_LIVE_EMBEDDINGS=true
 LANGFUSE_PUBLIC_KEY=replace-with-langfuse-public-key
 LANGFUSE_SECRET_KEY=replace-with-langfuse-secret-key
-POSTGRES_DSN=postgresql://memos:replace-with-rds-password@rm-xxxx.pg.rds.aliyuncs.com:5432/memos
-OPENSEARCH_ENDPOINT=https://opensearch-xxxx.aliyuncs.com
-OPENSEARCH_USERNAME=replace-with-opensearch-username
-OPENSEARCH_PASSWORD=replace-with-opensearch-password
-S3_ACCESS_KEY_ID=replace-with-oss-access-key-id
-S3_SECRET_ACCESS_KEY=replace-with-oss-secret-access-key
+POSTGRES_DSN=postgresql://memos:replace-with-postgres-password@postgres.internal:5432/memos
+PINECONE_API_KEY=replace-with-pinecone-api-key
+PINECONE_HOST=https://memos-q-vectors-xxxx.svc.aped-4627-b74a.pinecone.io
+S3_ENDPOINT_URL=http://minio.internal:9000
+S3_ACCESS_KEY_ID=replace-with-minio-access-key
+S3_SECRET_ACCESS_KEY=replace-with-minio-secret-key
 ```
 
 Use these storage modes:
 
 ```bash
-# Production on Alibaba Cloud: ECS runs the API/worker, RDS stores memory
-# records/audit history, Qwen Embedding creates vectors, and OpenSearch Vector
-# Engine searches those vectors with cosine similarity.
+# Production on Alibaba Cloud: ECS runs the API/worker plus Postgres, Redis,
+# and MinIO; Qwen/DashScope creates embeddings, and Pinecone searches vectors
+# with cosine similarity.
 MEMOS_STORE=alicloud
 QWEN_REQUIRE_LIVE_EMBEDDINGS=true
 
 # Development/test-only in-memory store. Do not use for production.
 MEMOS_STORE=memory
 
-# Development-only PostgreSQL store without OpenSearch Vector Engine.
+# Development-only PostgreSQL store without Pinecone.
 MEMOS_STORE=postgres
 ```
 
@@ -296,13 +308,15 @@ Memory Pipeline
    ├── Audit Agent
    └── Celery Compaction Agent
    ↓
-QwenCloud Models
+Qwen / DashScope Models
    ├── Qwen3.5-Plus
    ├── Qwen3.5-Flash
    ├── Qwen3-VL-Plus
    └── Qwen Batch API
    ↓
-PostgreSQL + pgvector / Redis / S3
+Alibaba ECS: Postgres records / Redis queue-cache / MinIO files
+   ↓
+Pinecone Vector DB
    ↓
 Prometheus + Grafana / OpenTelemetry / Langfuse
 ```

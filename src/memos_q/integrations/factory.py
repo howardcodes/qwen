@@ -10,8 +10,8 @@ from memos_q.store import InMemoryStore
 def build_memory_store(config: Settings = settings) -> InMemoryStore | PostgresMemoryStore:
     """Return the configured memory store.
 
-    ``MEMOS_STORE=alicloud`` is production mode: RDS/PostgreSQL stores memory
-    records and Alibaba Cloud OpenSearch Vector Engine performs vector recall.
+    ``MEMOS_STORE=alicloud`` is production mode: Postgres on ECS stores memory
+    records and Pinecone performs vector recall.
     """
 
     if config.memos_store.lower() in {"alicloud", "ecs"}:

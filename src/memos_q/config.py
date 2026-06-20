@@ -31,11 +31,10 @@ _DEFAULTS = {
     "api_base_url": "http://localhost:8000",
     "frontend_url": "http://localhost:3000",
     "memos_store": "memory",
-    "opensearch_endpoint": "",
-    "opensearch_username": "",
-    "opensearch_password": "",
-    "opensearch_index": "memos-q-vectors",
-    "opensearch_vector_field": "embedding",
+    "pinecone_api_key": "",
+    "pinecone_host": "",
+    "pinecone_namespace": "memos-q",
+    "pinecone_index": "memos-q-vectors",
     "qwen_api_key": "",
     "qwen_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "qwen_reasoning_model": "qwen3.5-plus",
@@ -77,11 +76,10 @@ class Settings:
     qwen_embedding_dimensions: int = 1024
     qwen_require_live_embeddings: bool = False
 
-    opensearch_endpoint: str = ""
-    opensearch_username: str = ""
-    opensearch_password: str = ""
-    opensearch_index: str = "memos-q-vectors"
-    opensearch_vector_field: str = "embedding"
+    pinecone_api_key: str = ""
+    pinecone_host: str = ""
+    pinecone_namespace: str = "memos-q"
+    pinecone_index: str = "memos-q-vectors"
 
     postgres_dsn: str = "postgresql://memos:memos@localhost:5432/memos"
     redis_url: str = "redis://localhost:6379/0"
@@ -117,11 +115,10 @@ class Settings:
             qwen_embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", _DEFAULTS["qwen_embedding_model"]),
             qwen_embedding_dimensions=int(os.getenv("QWEN_EMBEDDING_DIMENSIONS", _DEFAULTS["qwen_embedding_dimensions"])),
             qwen_require_live_embeddings=os.getenv("QWEN_REQUIRE_LIVE_EMBEDDINGS", "false").lower() == "true",
-            opensearch_endpoint=os.getenv("OPENSEARCH_ENDPOINT", _DEFAULTS["opensearch_endpoint"]),
-            opensearch_username=os.getenv("OPENSEARCH_USERNAME", _DEFAULTS["opensearch_username"]),
-            opensearch_password=os.getenv("OPENSEARCH_PASSWORD", _DEFAULTS["opensearch_password"]),
-            opensearch_index=os.getenv("OPENSEARCH_INDEX", _DEFAULTS["opensearch_index"]),
-            opensearch_vector_field=os.getenv("OPENSEARCH_VECTOR_FIELD", _DEFAULTS["opensearch_vector_field"]),
+            pinecone_api_key=os.getenv("PINECONE_API_KEY", _DEFAULTS["pinecone_api_key"]),
+            pinecone_host=os.getenv("PINECONE_HOST", _DEFAULTS["pinecone_host"]),
+            pinecone_namespace=os.getenv("PINECONE_NAMESPACE", _DEFAULTS["pinecone_namespace"]),
+            pinecone_index=os.getenv("PINECONE_INDEX", _DEFAULTS["pinecone_index"]),
             postgres_dsn=os.getenv("POSTGRES_DSN", _DEFAULTS["postgres_dsn"]),
             redis_url=os.getenv("REDIS_URL", _DEFAULTS["redis_url"]),
             s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", _DEFAULTS["s3_endpoint_url"]),

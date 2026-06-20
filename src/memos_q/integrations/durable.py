@@ -1,4 +1,4 @@
-"""Durable production integrations for PostgreSQL, pgvector, Redis, and S3."""
+"""Durable production integrations for PostgreSQL, Pinecone, Redis, and MinIO/S3."""
 
 from __future__ import annotations
 
@@ -344,11 +344,11 @@ class PostgresMemoryStore:
         )
 
 
-class OpenSearchVectorIndex:
-    """Alibaba Cloud OpenSearch Vector Engine adapter for memory embeddings.
+class PineconeVectorIndex:
+    """Pinecone adapter for Qwen/DashScope memory embeddings.
 
-    RDS remains the source of truth for memory records; this adapter stores and
-    searches only the vector document needed for cosine-similarity recall.
+    Postgres remains the source of truth for memory records; this adapter stores
+    and searches only the vector document needed for cosine-similarity recall.
     """
 
     def __init__(self, config: Settings = settings) -> None:
@@ -359,68 +359,67 @@ class OpenSearchVectorIndex:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.opensearch_endpoint and self.config.opensearch_username and self.config.opensearch_password)
+        return bool(self.config.pinecone_api_key and self.config.pinecone_host)
 
     def upsert_memory(self, memory: Memory) -> None:
-        """Index one memory vector in OpenSearch Vector Engine."""
+        """Index one memory vector in Pinecone."""
 
         if not self.enabled:
-            raise RuntimeError("OpenSearch Vector Engine credentials are required")
+            raise RuntimeError("Pinecone credentials are required")
         if not memory.embedding:
             raise ValueError("memory embedding is required before vector indexing")
         payload = {
-            "id": memory.id,
-            "user_id": memory.user_id,
-            "status": memory.status.value,
-            "content": memory.content,
-            self.config.opensearch_vector_field: memory.embedding,
-            "updated_at": memory.updated_at.isoformat(),
+            "vectors": [
+                {
+                    "id": memory.id,
+                    "values": memory.embedding,
+                    "metadata": {
+                        "user_id": memory.user_id,
+                        "status": memory.status.value,
+                        "content": memory.content,
+                        "updated_at": memory.updated_at.isoformat(),
+                    },
+                }
+            ],
+            "namespace": self.config.pinecone_namespace,
         }
-        self._request("PUT", f"/{self.config.opensearch_index}/_doc/{memory.id}", json=payload)
+        self._request("POST", "/vectors/upsert", json=payload)
 
     def update_memory_status(self, memory: Memory) -> None:
         """Update vector metadata after lifecycle changes."""
 
         if not self.enabled:
-            raise RuntimeError("OpenSearch Vector Engine credentials are required")
+            raise RuntimeError("Pinecone credentials are required")
         self._request(
             "POST",
-            f"/{self.config.opensearch_index}/_update/{memory.id}",
-            json={"doc": {"status": memory.status.value, "updated_at": memory.updated_at.isoformat()}},
+            "/vectors/update",
+            json={
+                "id": memory.id,
+                "namespace": self.config.pinecone_namespace,
+                "setMetadata": {"status": memory.status.value, "updated_at": memory.updated_at.isoformat()},
+            },
         )
 
     def search_memory_ids(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[str]:
-        """Return memory ids ranked by OpenSearch cosine vector similarity."""
+        """Return memory ids ranked by Pinecone vector similarity."""
 
         if not self.enabled:
-            raise RuntimeError("OpenSearch Vector Engine credentials are required")
+            raise RuntimeError("Pinecone credentials are required")
         payload = {
-            "size": limit,
-            "query": {
-                "bool": {
-                    "filter": [{"term": {"user_id": user_id}}, {"term": {"status": MemoryStatus.ACTIVE.value}}],
-                    "must": [
-                        {
-                            "knn": {
-                                self.config.opensearch_vector_field: {
-                                    "vector": query_embedding,
-                                    "k": limit,
-                                }
-                            }
-                        }
-                    ],
-                }
-            },
+            "vector": query_embedding,
+            "topK": limit,
+            "includeMetadata": False,
+            "namespace": self.config.pinecone_namespace,
+            "filter": {"user_id": {"$eq": user_id}, "status": {"$eq": MemoryStatus.ACTIVE.value}},
         }
-        data = self._request("POST", f"/{self.config.opensearch_index}/_search", json=payload)
-        return [hit["_id"] for hit in data.get("hits", {}).get("hits", [])]
+        data = self._request("POST", "/query", json=payload)
+        return [match["id"] for match in data.get("matches", [])]
 
     def _request(self, method: str, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
         response = self.session.request(
             method,
-            self.config.opensearch_endpoint.rstrip("/") + path,
-            auth=(self.config.opensearch_username, self.config.opensearch_password),
-            headers={"Content-Type": "application/json"},
+            self.config.pinecone_host.rstrip("/") + path,
+            headers={"Api-Key": self.config.pinecone_api_key, "Content-Type": "application/json"},
             json=json,
             timeout=30,
         )
@@ -429,11 +428,11 @@ class OpenSearchVectorIndex:
 
 
 class AliCloudMemoryStore:
-    """Production store: RDS for records plus OpenSearch Vector Engine for recall."""
+    """Production store: ECS-hosted Postgres records plus Pinecone vector recall."""
 
     def __init__(self, config: Settings = settings) -> None:
         self.records = PostgresMemoryStore(config)
-        self.vectors = OpenSearchVectorIndex(config)
+        self.vectors = PineconeVectorIndex(config)
 
     def migrate(self) -> None:
         self.records.migrate()
@@ -482,7 +481,7 @@ class RedisMemoryCache:
 
 
 class S3ObjectStore:
-    """S3-compatible object storage for PDFs, screenshots, and batch files."""
+    """MinIO/S3-compatible object storage for PDFs, screenshots, and batch files."""
 
     def __init__(self, config: Settings = settings) -> None:
         import boto3

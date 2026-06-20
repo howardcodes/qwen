@@ -7,8 +7,8 @@ import { getIntegrationStatus, IntegrationStatus, sendAgentMessage } from '../li
 const nodes: Node[] = [
   { id: 'user', position: { x: 0, y: 90 }, data: { label: 'User Input' }, type: 'input' },
   { id: 'api', position: { x: 210, y: 90 }, data: { label: 'FastAPI + Qwen-Agent' } },
-  { id: 'models', position: { x: 460, y: 0 }, data: { label: 'Qwen3.5 / Qwen3-VL / Batch' } },
-  { id: 'memory', position: { x: 460, y: 180 }, data: { label: 'Postgres + pgvector + Redis + S3' } },
+  { id: 'models', position: { x: 460, y: 0 }, data: { label: 'Qwen / DashScope' } },
+  { id: 'memory', position: { x: 460, y: 180 }, data: { label: 'Postgres + Pinecone + Redis + MinIO' } },
   { id: 'jobs', position: { x: 760, y: 180 }, data: { label: 'Celery Maintenance' } },
   { id: 'monitoring', position: { x: 760, y: 0 }, data: { label: 'Langfuse + OTel + Prometheus + Grafana' }, type: 'output' }
 ]
@@ -39,7 +39,8 @@ export default function Home() {
       ['FastAPI', status.backend.fastapi],
       ['Qwen API key', status.models.qwen_api_key_configured],
       ['Qwen-Agent', Boolean(status.backend.qwen_agent_available)],
-      ['PostgreSQL/pgvector', status.storage.postgres_dsn_configured],
+      ['Postgres on ECS', status.storage.postgres_dsn_configured],
+      ['Pinecone', Boolean(status.storage.pinecone_configured)],
       ['Redis/Celery', Boolean(status.jobs?.celery_broker_url_configured)],
       ['Langfuse', Boolean(status.monitoring?.langfuse_configured)]
     ]
@@ -66,7 +67,7 @@ export default function Home() {
           <h1 className="text-5xl font-black leading-tight">Self-evolving memory OS powered by QwenCloud integrations.</h1>
           <p className="mt-5 max-w-2xl text-lg text-slate-300">
             This dashboard connects Next.js 12, Tailwind CSS, shadcn-style UI primitives, React Flow, FastAPI,
-            QwenCloud, durable storage, Celery maintenance, and observability endpoints.
+            Qwen/DashScope, Pinecone vector recall, ECS-hosted Postgres/Redis/MinIO, Celery maintenance, and observability endpoints.
           </p>
         </div>
         <Card>
