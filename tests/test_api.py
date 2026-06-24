@@ -59,3 +59,19 @@ def test_per_user_recall_is_isolated():
     contents = [item["memory"]["content"] for item in response.json()]
     assert "User prefers Python." in contents
     assert "User prefers Rust." not in contents
+
+
+def test_integrations_status_reports_runtime_sections():
+    client = TestClient(app)
+
+    response = client.get("/integrations/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "qwen_agent_available" in payload["backend"]
+    assert "qwen_agent_package_available" in payload["backend"]
+    assert payload["jobs"]["celery_broker_url_configured"] is True
+    assert payload["jobs"]["celery_result_backend_configured"] is True
+    assert "langfuse_configured" in payload["monitoring"]
+    assert payload["monitoring"]["prometheus_metrics_path"] == "/metrics"
+    assert payload["models"]["reasoning_model"]
