@@ -34,3 +34,48 @@ export async function sendAgentMessage(userId: string, message: string) {
   }
   return response.json()
 }
+
+export type MemoryRecord = {
+  id: string
+  content: string
+  memory_type: string
+  status: string
+  confidence_score: number
+  created_at: string
+  updated_at: string
+  tags: string[]
+}
+
+export async function getMemories(userId: string): Promise<MemoryRecord[]> {
+  const response = await fetch(`${API_BASE_URL}/users/me/memories?include_inactive=true`, { headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
+
+export async function approveMemory(userId: string, memoryId: string) {
+  const response = await fetch(`${API_BASE_URL}/users/me/memories/${memoryId}/approve`, { method: 'POST', headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
+
+export async function rejectMemory(userId: string, memoryId: string) {
+  const response = await fetch(`${API_BASE_URL}/users/me/memories/${memoryId}/reject`, { method: 'POST', headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
+
+export async function editMemory(userId: string, memoryId: string, content: string) {
+  const response = await fetch(`${API_BASE_URL}/users/me/memories/${memoryId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+    body: JSON.stringify({ content })
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
+
+export async function deleteMemory(userId: string, memoryId: string) {
+  const response = await fetch(`${API_BASE_URL}/users/me/memories/${memoryId}`, { method: 'DELETE', headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}

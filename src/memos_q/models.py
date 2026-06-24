@@ -14,11 +14,8 @@ class MemoryStatus(StrEnum):
 
     ACTIVE = "active"
     PENDING_REVIEW = "pending_review"
-    NEEDS_CONFIRMATION = "needs_confirmation"
     REJECTED = "rejected"
     POSSIBLY_CONFLICTING = "possibly_conflicting"
-    DEPRECATED = "deprecated"
-    ARCHIVED = "archived"
     FORGOTTEN = "forgotten"
 
 
@@ -29,6 +26,7 @@ class MemoryType(StrEnum):
     PREFERENCE = "preference"
     TASK = "task"
     PROJECT_CONTEXT = "project_context"
+    WORKFLOW = "workflow"
     CONVERSATION_SUMMARY = "conversation_summary"
     SYSTEM_TOOL_EVENT = "system_tool_event"
     WORKING = "working"
@@ -67,6 +65,7 @@ class Memory:
     stability_score: float = 0.5
     confidence_reasons: list[str] = field(default_factory=list)
     embedding: list[float] | None = None
+    sensitivity: str = "low"
     tags: set[str] = field(default_factory=set)
     metadata: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid4()))
@@ -75,6 +74,10 @@ class Memory:
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
     last_recalled_at: datetime | None = None
+    approved_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    conflicting_memory_id: str | None = None
+    conflict_reason: str | None = None
     expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -84,6 +87,7 @@ class Memory:
         self.importance_score = clamp_score(self.importance_score)
         self.novelty_score = clamp_score(self.novelty_score)
         self.stability_score = clamp_score(self.stability_score)
+        self.sensitivity = self.sensitivity.lower()
         self.tags = {tag.lower() for tag in self.tags}
 
 

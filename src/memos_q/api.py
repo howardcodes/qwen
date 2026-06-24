@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from typing import Any
 
 import requests
@@ -17,6 +19,7 @@ from .engine import MemoryOS
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
 from .models import MemoryStatus, MemoryType
+from .monitoring import memory_metrics as metrics
 from .monitoring.observability import add_prometheus_metrics, configure_opentelemetry
 
 qwen_client = QwenCloudClient()
@@ -51,6 +54,20 @@ class VisionIngestRequest(BaseModel):
     image_url: AnyUrl
     source_session: str = Field(default="vision-upload", min_length=1, max_length=128)
     prompt: str = Field(default="Extract durable memory facts from this image or document.", min_length=1, max_length=2000)
+
+
+class MemoryPatchRequest(BaseModel):
+    """Request body for editing and approving a memory."""
+
+    content: str = Field(..., min_length=1, max_length=5000)
+
+
+class ExtractedMemory(BaseModel):
+    content: str = Field(..., min_length=1, max_length=500)
+    type: MemoryType
+    confidence: float = Field(..., ge=0, le=1)
+    sensitivity: str = Field(..., pattern="^(low|medium|high)$")
+    reason: str = Field(default="", max_length=500)
 
 
 class RecallRequest(BaseModel):
@@ -112,12 +129,19 @@ async def remember(request: RememberRequest, user_id: str = Depends(authenticate
         metadata={**request.metadata, "source": request.metadata.get("source", "explicit_user")},
         actor="user",
     )
+    metrics.memories_created_total.inc()
+    refresh_memory_gauges(user_id)
     return serialize_memory(memory)
 
 
 @app.post("/recall")
 async def recall(request: RecallRequest, user_id: str = Depends(authenticated_user)) -> list[dict[str, Any]]:
+    start = time.perf_counter()
     results = await run_in_threadpool(memory_os.recall, user_id, request.query, query_tags=request.query_tags, limit=request.limit)
+    metrics.memory_search_latency_seconds.observe(time.perf_counter() - start)
+    for result in results:
+        metrics.memories_recalled_total.inc()
+        metrics.memory_recall_score.observe(result.score)
     return [serialize_recall(result) for result in results]
 
 
@@ -133,22 +157,31 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
         ],
         model=settings.qwen_reasoning_model,
     )
-    durable_facts = extract_durable_facts(response)
+    start = time.perf_counter()
+    durable_facts = extract_durable_memories(request.message, response, memory_context)
+    metrics.memory_extraction_latency_seconds.observe(time.perf_counter() - start)
     saved = []
     for fact in durable_facts:
+        lifecycle_status = status_for_extracted_memory(fact)
+        if lifecycle_status is None:
+            continue
         saved.append(
             await run_in_threadpool(
                 memory_os.remember,
                 user_id=user_id,
-                content=fact,
-                memory_type=MemoryType.CONVERSATION_SUMMARY,
+                content=fact.content,
+                memory_type=fact.type,
                 source_session=request.source_session,
                 tags={"agent", "qwen", "extracted"},
-                metadata={"source": "agent_extraction"},
-                status=MemoryStatus.PENDING_REVIEW,
+                metadata={"source": "agent_extraction", "reason": fact.reason},
+                confidence_score=fact.confidence,
+                sensitivity=fact.sensitivity,
+                status=lifecycle_status,
                 actor="qwen-agent",
             )
         )
+        metrics.memories_created_total.inc()
+    refresh_memory_gauges(user_id)
     return {"response": response, "recalled_memories": [serialize_memory(item.memory) for item in recalled], "pending_memories": [serialize_memory(item) for item in saved]}
 
 
@@ -210,9 +243,36 @@ async def inspect(include_inactive: bool = False, user_id: str = Depends(authent
     return [serialize_memory(memory) for memory in memories]
 
 
+@app.post("/users/me/memories/{memory_id}/approve")
+async def approve_memory(memory_id: str, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    memory = await run_in_threadpool(memory_os.approve, user_id, memory_id, actor="user")
+    metrics.memories_approved_total.inc()
+    refresh_memory_gauges(user_id)
+    return serialize_memory(memory)
+
+
+@app.post("/users/me/memories/{memory_id}/reject")
+async def reject_memory(memory_id: str, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    memory = await run_in_threadpool(memory_os.reject, user_id, memory_id, actor="user")
+    metrics.memories_rejected_total.inc()
+    refresh_memory_gauges(user_id)
+    return serialize_memory(memory)
+
+
+@app.patch("/users/me/memories/{memory_id}")
+async def edit_memory(memory_id: str, request: MemoryPatchRequest, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    memory = await run_in_threadpool(memory_os.edit_and_approve, user_id, memory_id, content=request.content, actor="user")
+    metrics.memories_approved_total.inc()
+    refresh_memory_gauges(user_id)
+    return serialize_memory(memory)
+
+
 @app.delete("/users/me/memories/{memory_id}")
 async def delete_memory(memory_id: str, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
-    return serialize_memory(await run_in_threadpool(memory_os.forget, user_id, memory_id, actor="user"))
+    memory = await run_in_threadpool(memory_os.forget, user_id, memory_id, actor="user")
+    metrics.memories_deleted_total.inc()
+    refresh_memory_gauges(user_id)
+    return serialize_memory(memory)
 
 
 @app.post("/users/me/maintenance")
@@ -225,7 +285,7 @@ def serialize_recall(result: Any) -> dict[str, Any]:
 
 
 def serialize_memory(memory: Any) -> dict[str, Any]:
-    return {"id": memory.id, "user_id": memory.user_id, "content": memory.content, "memory_type": memory.memory_type.value, "source_session": memory.source_session, "confidence_score": memory.confidence_score, "confidence_reasons": memory.confidence_reasons, "importance_score": memory.importance_score, "novelty_score": memory.novelty_score, "stability_score": memory.stability_score, "status": memory.status.value, "version": memory.version, "tags": sorted(memory.tags), "created_at": memory.created_at.isoformat(), "updated_at": memory.updated_at.isoformat()}
+    return {"id": memory.id, "user_id": memory.user_id, "content": memory.content, "memory_type": memory.memory_type.value, "source_session": memory.source_session, "confidence_score": memory.confidence_score, "confidence_reasons": memory.confidence_reasons, "importance_score": memory.importance_score, "novelty_score": memory.novelty_score, "stability_score": memory.stability_score, "status": memory.status.value, "sensitivity": memory.sensitivity, "approved_at": memory.approved_at.isoformat() if memory.approved_at else None, "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None, "conflicting_memory_id": memory.conflicting_memory_id, "conflict_reason": memory.conflict_reason, "version": memory.version, "tags": sorted(memory.tags), "created_at": memory.created_at.isoformat(), "updated_at": memory.updated_at.isoformat()}
 
 
 def format_memory_context(recalled: list[Any]) -> str:
@@ -234,12 +294,35 @@ def format_memory_context(recalled: list[Any]) -> str:
     return "\n".join(f"- fact: {item.memory.content}\n  confidence: {item.memory.confidence_score:.2f}\n  source: {item.memory.source_session}\n  updated_at: {item.memory.updated_at.isoformat()}" for item in recalled)
 
 
-def extract_durable_facts(response: str) -> list[str]:
-    """Conservative extraction placeholder that avoids storing raw agent responses."""
+def status_for_extracted_memory(memory: ExtractedMemory) -> MemoryStatus | None:
+    if memory.confidence < 0.60:
+        return None
+    if memory.confidence >= 0.90 and memory.sensitivity == "low":
+        return MemoryStatus.ACTIVE
+    return MemoryStatus.PENDING_REVIEW
 
-    facts = []
-    for line in response.splitlines():
-        cleaned = line.strip(" -•")
-        if cleaned.lower().startswith(("user prefers ", "user uses ", "user is working on ")) and len(cleaned) <= 500:
-            facts.append(cleaned)
-    return facts[:5]
+
+def extract_durable_memories(user_message: str, assistant_response: str, conversation_context: str) -> list[ExtractedMemory]:
+    """Ask Qwen for strict JSON memories using message, response, and context."""
+
+    prompt = (
+        "Extract durable memories from the user message, assistant response, and context. "
+        "Return only a JSON array of objects with content, type, confidence, sensitivity, reason. "
+        "Allowed types: preference, user_fact, project_context, task, workflow. "
+        "Allowed sensitivity: low, medium, high.\n"
+        f"Context:\n{conversation_context}\nUser Message:\n{user_message}\nAssistant Response:\n{assistant_response}"
+    )
+    try:
+        raw = qwen_client.chat([QwenMessage("system", "Return strict JSON only."), QwenMessage("user", prompt)], temperature=0)
+        data = json.loads(raw)
+        return [ExtractedMemory.model_validate(item) for item in data][:5]
+    except Exception:
+        metrics.qwen_errors_total.inc()
+        return []
+
+
+def refresh_memory_gauges(user_id: str) -> None:
+    memories = memory_os.inspect(user_id, include_inactive=True)
+    metrics.active_memory_count.set(sum(1 for item in memories if item.status == MemoryStatus.ACTIVE))
+    metrics.pending_review_count.set(sum(1 for item in memories if item.status == MemoryStatus.PENDING_REVIEW))
+    metrics.conflicting_memory_count.set(sum(1 for item in memories if item.status == MemoryStatus.POSSIBLY_CONFLICTING))

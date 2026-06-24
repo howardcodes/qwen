@@ -61,7 +61,12 @@ class PostgresMemoryStore:
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL,
                     last_recalled_at TIMESTAMPTZ,
-                    expires_at TIMESTAMPTZ
+                    approved_at TIMESTAMPTZ,
+                    last_seen_at TIMESTAMPTZ,
+                    expires_at TIMESTAMPTZ,
+                    sensitivity TEXT NOT NULL DEFAULT 'low',
+                    conflicting_memory_id TEXT,
+                    conflict_reason TEXT
                 )
                 """
             )
@@ -89,7 +94,15 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'low'")
+            cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS conflicting_memory_id TEXT")
+            cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS conflict_reason TEXT")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_status ON memories(user_id, status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_type ON memories(user_id, memory_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_updated ON memories(user_id, updated_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_memory_type ON memories(memory_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_updated_at ON memories(updated_at DESC)")
@@ -108,8 +121,9 @@ class PostgresMemoryStore:
                     id, user_id, memory_type, content, confidence_score,
                     importance_score, novelty_score, stability_score, confidence_reasons,
                     status, version, source_session, tags, metadata, created_at, updated_at,
-                    last_recalled_at, expires_at, embedding
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity,
+                    conflicting_memory_id, conflict_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     memory.id,
@@ -129,8 +143,13 @@ class PostgresMemoryStore:
                     memory.created_at,
                     memory.updated_at,
                     memory.last_recalled_at,
+                    memory.approved_at,
+                    memory.last_seen_at,
                     memory.expires_at,
                     json.dumps(memory.embedding) if self.config.memos_store.lower() == "alicloud" else memory.embedding,
+                    memory.sensitivity,
+                    memory.conflicting_memory_id,
+                    memory.conflict_reason,
                 ),
             )
             self._record_audit(cursor, "remember", actor, memory.id, None, memory_snapshot(memory))
@@ -146,7 +165,7 @@ class PostgresMemoryStore:
                 SELECT id, user_id, memory_type, content, confidence_score,
                        importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, expires_at, embedding
+                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason
                 FROM memories
                 WHERE id = %s
                 """,
@@ -175,7 +194,7 @@ class PostgresMemoryStore:
                     importance_score = %s, novelty_score = %s, stability_score = %s,
                     confidence_reasons = %s, status = %s, version = %s, tags = %s,
                     metadata = %s, updated_at = %s, last_recalled_at = %s,
-                    expires_at = %s, embedding = %s
+                    approved_at = %s, last_seen_at = %s, expires_at = %s, embedding = %s, sensitivity = %s, conflicting_memory_id = %s, conflict_reason = %s
                 WHERE id = %s
                 """,
                 (
@@ -192,8 +211,13 @@ class PostgresMemoryStore:
                     json.dumps(memory.metadata),
                     memory.updated_at,
                     memory.last_recalled_at,
+                    memory.approved_at,
+                    memory.last_seen_at,
                     memory.expires_at,
                     json.dumps(memory.embedding) if self.config.memos_store.lower() == "alicloud" else memory.embedding,
+                    memory.sensitivity,
+                    memory.conflicting_memory_id,
+                    memory.conflict_reason,
                     memory.id,
                 ),
             )
@@ -298,7 +322,7 @@ class PostgresMemoryStore:
                 SELECT id, user_id, memory_type, content, confidence_score,
                        importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, expires_at, embedding
+                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason
                 FROM memories
                 WHERE user_id = %s {status_clause}
                 ORDER BY created_at
@@ -307,18 +331,19 @@ class PostgresMemoryStore:
             )
             return [memory_from_row(row) for row in cursor.fetchall()]
 
-    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[Memory]:
+    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20, include_inactive: bool = False) -> list[Memory]:
         """Load nearest active memories using pgvector cosine distance."""
 
+        status_clause = "AND status != 'forgotten'" if include_inactive else "AND status = 'active'"
         with self.connection.cursor() as cursor:
             cursor.execute(
-                """
+                f"""
                 SELECT id, user_id, memory_type, content, confidence_score,
                        importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, expires_at, embedding
+                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason
                 FROM memories
-                WHERE user_id = %s AND status = 'active' AND embedding IS NOT NULL
+                WHERE user_id = %s {status_clause} AND embedding IS NOT NULL
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
                 """,
@@ -400,7 +425,7 @@ class PineconeVectorIndex:
             },
         )
 
-    def search_memory_ids(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[str]:
+    def search_memory_ids(self, user_id: str, query_embedding: list[float], *, limit: int = 20, include_inactive: bool = False) -> list[str]:
         """Return memory ids ranked by Pinecone vector similarity."""
 
         if not self.enabled:
@@ -410,7 +435,7 @@ class PineconeVectorIndex:
             "topK": limit,
             "includeMetadata": False,
             "namespace": self.config.pinecone_namespace,
-            "filter": {"user_id": {"$eq": user_id}, "status": {"$eq": MemoryStatus.ACTIVE.value}},
+            "filter": {"user_id": {"$eq": user_id}} if include_inactive else {"user_id": {"$eq": user_id}, "status": {"$eq": MemoryStatus.ACTIVE.value}},
         }
         data = self._request("POST", "/query", json=payload)
         return [match["id"] for match in data.get("matches", [])]
@@ -450,8 +475,8 @@ class AliCloudMemoryStore:
             self.vectors.update_memory_status(updated)
         return updated
 
-    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[Memory]:
-        ids = self.vectors.search_memory_ids(user_id, query_embedding, limit=limit)
+    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20, include_inactive: bool = False) -> list[Memory]:
+        ids = self.vectors.search_memory_ids(user_id, query_embedding, limit=limit, include_inactive=include_inactive)
         memories = []
         for memory_id in ids:
             try:
@@ -531,8 +556,13 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         created_at,
         updated_at,
         last_recalled_at,
+        approved_at,
+        last_seen_at,
         expires_at,
         embedding,
+        sensitivity,
+        conflicting_memory_id,
+        conflict_reason,
     ) = row
     if isinstance(tags, str):
         tags = json.loads(tags)
@@ -561,5 +591,10 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         created_at=created_at,
         updated_at=updated_at,
         last_recalled_at=last_recalled_at,
+        approved_at=approved_at,
+        last_seen_at=last_seen_at,
         expires_at=expires_at,
+        sensitivity=sensitivity or "low",
+        conflicting_memory_id=conflicting_memory_id,
+        conflict_reason=conflict_reason,
     )
