@@ -89,14 +89,16 @@ def hybrid_retrieval_score(
         "confidence": memory.confidence_score,
         "graph": graph_proximity_score(memory, query_tags),
     }
+    type_boost = 0.05 if memory.memory_type.value in {"preference", "workflow"} else 0.0
+    approval_boost = 0.05 if memory.approved_at is not None and recency_score(memory.approved_at) > 0.75 else 0.0
+    signals["type_boost"] = type_boost
+    signals["approval_boost"] = approval_boost
     score = (
-        0.30 * signals["vector"]
-        + 0.20 * signals["semantic"]
-        + 0.15 * signals["keyword"]
-        + 0.10 * signals["recency"]
-        + 0.10 * signals["importance"]
-        + 0.10 * signals["confidence"]
-        + 0.05 * signals["graph"]
+        0.60 * signals["vector"]
+        + 0.20 * signals["recency"]
+        + 0.20 * signals["confidence"]
+        + type_boost
+        + approval_boost
     )
     return clamp_score(score), signals
 

@@ -58,10 +58,10 @@ class InMemoryStore:
             key=lambda item: item.created_at,
         )
 
-    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20) -> list[Memory]:
+    def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20, include_inactive: bool = False) -> list[Memory]:
         """Return nearest memories for a user using stored embedding vectors."""
 
-        candidates = [memory for memory in self.list_memories(user_id) if memory.embedding]
+        candidates = [memory for memory in self.list_memories(user_id, include_inactive=include_inactive) if memory.embedding and memory.status != MemoryStatus.FORGOTTEN]
         return sorted(
             candidates,
             key=lambda memory: cosine_similarity(query_embedding, memory.embedding),
@@ -144,6 +144,11 @@ def memory_snapshot(memory: Memory) -> dict[str, object]:
         "stability_score": memory.stability_score,
         "confidence_reasons": list(memory.confidence_reasons),
         "embedding_dimensions": len(memory.embedding or []),
+        "sensitivity": memory.sensitivity,
+        "approved_at": memory.approved_at.isoformat() if memory.approved_at else None,
+        "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None,
+        "conflicting_memory_id": memory.conflicting_memory_id,
+        "conflict_reason": memory.conflict_reason,
         "status": memory.status.value,
         "version": memory.version,
         "tags": sorted(memory.tags),

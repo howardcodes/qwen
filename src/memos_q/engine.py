@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
+import json
 from typing import Protocol
 
 from .models import (
@@ -29,6 +30,13 @@ from .models import (
 )
 from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, quality_scores, tokenize
 from .store import InMemoryStore
+
+
+class ConflictDetector(Protocol):
+    """Provider interface for Qwen semantic conflict checks."""
+
+    def chat(self, messages: Sequence[object], *, model: str | None = None, temperature: float = 0.2) -> str:
+        """Return a JSON conflict decision."""
 
 
 class EmbeddingProvider(Protocol):
@@ -51,11 +59,13 @@ class MemoryOS:
         embedding_provider: EmbeddingProvider | None = None,
         require_live_embeddings: bool = False,
         fallback_embedding_dimensions: int = 1024,
+        conflict_detector: ConflictDetector | None = None,
     ) -> None:
         self.store = store or InMemoryStore()
         self.embedding_provider = embedding_provider
         self.require_live_embeddings = require_live_embeddings
         self.fallback_embedding_dimensions = fallback_embedding_dimensions
+        self.conflict_detector = conflict_detector
 
     def remember(
         self,
@@ -72,9 +82,10 @@ class MemoryOS:
         metadata: dict[str, object] | None = None,
         confidence_reasons: list[str] | None = None,
         status: MemoryStatus = MemoryStatus.ACTIVE,
+        sensitivity: str = "low",
         actor: str = "memory-agent",
     ) -> Memory:
-        """Create a memory and resolve obvious conflicts."""
+        """Create a memory with duplicate and conflict lifecycle controls."""
 
         existing = self.store.list_memories(user_id)
         scores = quality_scores(content, existing) # KIV In production, this would be a more sophisticated scoring function possibly involving ML models
@@ -92,9 +103,15 @@ class MemoryOS:
             confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
             embedding=self._embed_text(content),
             status=status,
+            sensitivity=sensitivity,
+            approved_at=utc_now() if status == MemoryStatus.ACTIVE else None,
+            last_seen_at=utc_now(),
         )
+        duplicate = self._handle_duplicate(memory, actor=actor)
+        if duplicate is not None:
+            return duplicate
+        self._mark_conflicts(memory, actor=actor)
         self.store.add_memory(memory, actor=actor)
-        self._resolve_conflicts(memory, existing) # KIV This is a simple heuristic conflict resolution. In production, this could be more complex and involve human-in-the-loop review for certain cases.
         return memory
 
     def recall(
@@ -110,7 +127,7 @@ class MemoryOS:
         results: list[RecallResult] = []
         query_embedding = self._embed_text(query)
         vector_candidates = self.store.vector_search(user_id, query_embedding, limit=max(limit * 4, 20))
-        candidate_memories = vector_candidates or self.store.list_memories(user_id)
+        candidate_memories = [m for m in (vector_candidates or self.store.list_memories(user_id)) if m.status == MemoryStatus.ACTIVE]
         for memory in candidate_memories:
             if memory.embedding is None:
                 memory.embedding = self._embed_text(memory.content)
@@ -146,6 +163,24 @@ class MemoryOS:
             raise ValueError("memory does not belong to user")
         return self.store.update_memory(memory_id, actor=actor, status=MemoryStatus.FORGOTTEN)
 
+    def approve(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
+        memory = self._owned_memory(user_id, memory_id)
+        return self.store.update_memory(memory.id, actor=actor, status=MemoryStatus.ACTIVE, approved_at=utc_now())
+
+    def reject(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
+        memory = self._owned_memory(user_id, memory_id)
+        return self.store.update_memory(memory.id, actor=actor, status=MemoryStatus.REJECTED)
+
+    def edit_and_approve(self, user_id: str, memory_id: str, *, content: str, actor: str = "user") -> Memory:
+        memory = self._owned_memory(user_id, memory_id)
+        return self.store.update_memory(memory.id, actor=actor, content=content, embedding=self._embed_text(content), status=MemoryStatus.ACTIVE, approved_at=utc_now())
+
+    def _owned_memory(self, user_id: str, memory_id: str) -> Memory:
+        memory = self.store.get_memory(memory_id)
+        if memory.user_id != user_id:
+            raise ValueError("memory does not belong to user")
+        return memory
+
     def inspect(self, user_id: str, *, include_inactive: bool = False) -> list[Memory]:
         """List a user's memories for transparency controls."""
 
@@ -154,8 +189,8 @@ class MemoryOS:
     def maintenance(self, user_id: str) -> dict[str, int]:
         """Run autonomous memory maintenance for one user."""
 
-        memories = self.store.list_memories(user_id)
-        merged = self._merge_duplicates(memories)
+        memories = self.store.list_memories(user_id, include_inactive=True)
+        merged = self._merge_duplicates([m for m in memories if m.status != MemoryStatus.FORGOTTEN])
         promoted = self._promote_stable_facts(self.store.list_memories(user_id))
         decayed = self._decay_low_stability(self.store.list_memories(user_id))
         archived = self._archive_stale(self.store.list_memories(user_id))
@@ -173,6 +208,65 @@ class MemoryOS:
                 raise
             raise RuntimeError("Qwen embedding provider failed and local embeddings are disabled")
 
+
+    def _handle_duplicate(self, memory: Memory, *, actor: str) -> Memory | None:
+        candidates = self.store.vector_search(memory.user_id, memory.embedding or [], limit=5, include_inactive=True)
+        for candidate in candidates:
+            similarity = keyword_score(memory.content, candidate)
+            if memory.embedding and candidate.embedding:
+                from .scoring import cosine_similarity
+                similarity = max(similarity, cosine_similarity(memory.embedding, candidate.embedding))
+            if similarity > 0.90:
+                try:
+                    from .monitoring import memory_metrics as metrics
+                    metrics.duplicate_count.inc()
+                except Exception:
+                    pass
+                return self.store.update_memory(
+                    candidate.id,
+                    actor="duplicate-detector",
+                    confidence_score=clamp_score(candidate.confidence_score + 0.03),
+                    last_seen_at=utc_now(),
+                )
+            if similarity > 0.75:
+                memory.status = MemoryStatus.PENDING_REVIEW
+                memory.tags.add("possible_duplicate")
+                memory.metadata["possible_duplicate_of"] = candidate.id
+                memory.confidence_reasons.append("possible duplicate requires review")
+                break
+        return None
+
+    def _mark_conflicts(self, memory: Memory, *, actor: str) -> None:
+        for candidate in self.store.vector_search(memory.user_id, memory.embedding or [], limit=5, include_inactive=True):
+            if candidate.status == MemoryStatus.FORGOTTEN or candidate.id == memory.id:
+                continue
+            conflict, reason = self._semantic_conflict(memory, candidate)
+            if conflict:
+                try:
+                    from .monitoring import memory_metrics as metrics
+                    metrics.conflict_count.inc()
+                except Exception:
+                    pass
+                memory.status = MemoryStatus.POSSIBLY_CONFLICTING
+                memory.conflicting_memory_id = candidate.id
+                memory.conflict_reason = reason
+                memory.confidence_reasons.append(f"conflict requires review: {reason}")
+                self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=candidate.id, relation_type=RelationType.CONTRADICTS))
+                return
+
+    def _semantic_conflict(self, memory: Memory, candidate: Memory) -> tuple[bool, str]:
+        if self.conflict_detector is not None:
+            prompt = f"Are these memories semantically conflicting? Return JSON with conflict and reason.\nA: {memory.content}\nB: {candidate.content}"
+            try:
+                data = json.loads(self.conflict_detector.chat([{"role": "user", "content": prompt}], temperature=0))
+                return bool(data.get("conflict")), str(data.get("reason", "semantic conflict"))
+            except Exception:
+                pass
+        new_subject = _subject_key(memory.content)
+        if new_subject and new_subject == _subject_key(candidate.content) and keyword_score(memory.content, candidate) < 0.85:
+            return True, "same subject has a different asserted value"
+        return False, ""
+
     def _resolve_conflicts(self, new_memory: Memory, existing: list[Memory]) -> None:
         new_subject = _subject_key(new_memory.content)
         if not new_subject:
@@ -188,7 +282,7 @@ class MemoryOS:
                 self.store.update_memory(
                     old_memory.id,
                     actor="conflict-resolver",
-                    status=MemoryStatus.DEPRECATED,
+                    status=MemoryStatus.POSSIBLY_CONFLICTING,
                 )
                 self.store.add_edge(
                     MemoryEdge(
@@ -242,7 +336,7 @@ class MemoryOS:
                 self.store.update_memory(
                     duplicate.id,
                     actor="compaction-agent",
-                    status=MemoryStatus.ARCHIVED,
+                    status=MemoryStatus.REJECTED,
                 )
                 self.store.add_edge(
                     MemoryEdge(
@@ -288,7 +382,7 @@ class MemoryOS:
                 self.store.update_memory(
                     memory.id,
                     actor="maintenance-agent",
-                    status=MemoryStatus.ARCHIVED,
+                    status=MemoryStatus.REJECTED,
                 )
                 archived += 1
         return archived
