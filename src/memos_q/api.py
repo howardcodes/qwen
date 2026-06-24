@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import time
@@ -213,9 +214,19 @@ async def ingest_vision(request: VisionIngestRequest, user_id: str = Depends(aut
 
 @app.get("/integrations/status")
 async def integrations_status() -> dict[str, Any]:
+    qwen_agent_package_available = importlib.util.find_spec("qwen_agent") is not None
+    qwen_api_key_configured = bool(settings.qwen_api_key)
+    celery_broker_url_configured = bool(settings.celery_broker_url)
+    celery_result_backend_configured = bool(settings.celery_result_backend)
+    langfuse_configured = bool(settings.langfuse_public_key and settings.langfuse_secret_key)
     return {
         "frontend": {"nextjs_url": settings.frontend_url},
-        "backend": {"fastapi": True, "target": "Alibaba Cloud ECS"},
+        "backend": {
+            "fastapi": True,
+            "target": "Alibaba Cloud ECS",
+            "qwen_agent_available": qwen_api_key_configured,
+            "qwen_agent_package_available": qwen_agent_package_available,
+        },
         "storage": {
             "mode": settings.memos_store,
             "postgres_dsn_configured": bool(settings.postgres_dsn),
@@ -228,11 +239,26 @@ async def integrations_status() -> dict[str, Any]:
             "pinecone_namespace": settings.pinecone_namespace,
         },
         "models": {
-            "qwen_api_key_configured": bool(settings.qwen_api_key),
+            "qwen_api_key_configured": qwen_api_key_configured,
             "base_url": settings.qwen_base_url,
+            "reasoning_model": settings.qwen_reasoning_model,
+            "flash_model": settings.qwen_flash_model,
+            "vision_model": settings.qwen_vl_model,
             "embedding_model": settings.qwen_embedding_model,
             "embedding_dimensions": settings.qwen_embedding_dimensions,
             "live_embeddings_required": settings.qwen_require_live_embeddings,
+        },
+        "jobs": {
+            "celery_broker_url_configured": celery_broker_url_configured,
+            "celery_result_backend_configured": celery_result_backend_configured,
+            "celery_configured": celery_broker_url_configured and celery_result_backend_configured,
+        },
+        "monitoring": {
+            "langfuse_configured": langfuse_configured,
+            "langfuse_host": settings.langfuse_host,
+            "otel_endpoint": settings.otel_exporter_otlp_endpoint,
+            "otel_configured": bool(settings.otel_exporter_otlp_endpoint),
+            "prometheus_metrics_path": "/metrics",
         },
     }
 

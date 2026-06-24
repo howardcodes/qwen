@@ -2,17 +2,20 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8
 
 export type IntegrationStatus = {
   frontend: { nextjs_url: string }
-  backend: { fastapi: boolean; qwen_agent_available?: boolean }
+  backend: { fastapi: boolean; qwen_agent_available?: boolean; qwen_agent_package_available?: boolean }
   models: {
     qwen_api_key_configured: boolean
     reasoning_model?: string
     flash_model?: string
     vision_model?: string
+    embedding_model?: string
+    embedding_dimensions?: number
+    live_embeddings_required?: boolean
     base_url?: string
   }
   storage: { postgres_dsn_configured: boolean; redis_url_configured: boolean; s3_bucket?: string; pinecone_configured?: boolean }
-  jobs?: { celery_broker_url_configured: boolean }
-  monitoring?: { langfuse_configured: boolean; otel_endpoint: string; prometheus_metrics_path: string }
+  jobs?: { celery_broker_url_configured: boolean; celery_result_backend_configured?: boolean; celery_configured?: boolean }
+  monitoring?: { langfuse_configured: boolean; langfuse_host?: string; otel_endpoint: string; otel_configured?: boolean; prometheus_metrics_path: string }
 }
 
 export async function getIntegrationStatus(): Promise<IntegrationStatus> {
