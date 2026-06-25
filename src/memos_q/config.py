@@ -42,6 +42,19 @@ _DEFAULTS = {
     "qwen_vl_model": "qwen3-vl-plus",
     "qwen_embedding_model": "text-embedding-v4",
     "qwen_embedding_dimensions": "1024",
+    "qwen_chat_default_model": "qwen3.5-flash",
+    "qwen_chat_max_tokens": "800",
+    "qwen_reasoning_max_tokens": "1200",
+    "qwen_memory_extraction_max_tokens": "500",
+    "qwen_conflict_resolution_max_tokens": "300",
+    "qwen_summary_max_tokens": "400",
+    "memory_recall_top_k": "5",
+    "memory_recall_vector_top_k": "10",
+    "memory_recall_fallback_limit": "20",
+    "memory_extraction_include_assistant_response": "false",
+    "memory_extraction_max_input_chars": "4000",
+    "memory_auto_approve_confidence": "0.90",
+    "memory_conflict_confirmation_enabled": "true",
     "postgres_dsn": "postgresql://memos:memos@localhost:5432/memos",
     "redis_url": "redis://localhost:6379/0",
     "s3_endpoint_url": "http://localhost:9000",
@@ -74,6 +87,19 @@ class Settings:
     qwen_vl_model: str = "qwen3-vl-plus"
     qwen_embedding_model: str = "text-embedding-v4"
     qwen_embedding_dimensions: int = 1024
+    qwen_chat_default_model: str = "qwen3.5-flash"
+    qwen_chat_max_tokens: int = 800
+    qwen_reasoning_max_tokens: int = 1200
+    qwen_memory_extraction_max_tokens: int = 500
+    qwen_conflict_resolution_max_tokens: int = 300
+    qwen_summary_max_tokens: int = 400
+    memory_recall_top_k: int = 5
+    memory_recall_vector_top_k: int = 10
+    memory_recall_fallback_limit: int = 20
+    memory_extraction_include_assistant_response: bool = False
+    memory_extraction_max_input_chars: int = 4000
+    memory_auto_approve_confidence: float = 0.90
+    memory_conflict_confirmation_enabled: bool = True
     qwen_require_live_embeddings: bool = False
 
     pinecone_api_key: str = ""
@@ -114,6 +140,19 @@ class Settings:
             qwen_vl_model=os.getenv("QWEN_VL_MODEL", _DEFAULTS["qwen_vl_model"]),
             qwen_embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", _DEFAULTS["qwen_embedding_model"]),
             qwen_embedding_dimensions=int(os.getenv("QWEN_EMBEDDING_DIMENSIONS", _DEFAULTS["qwen_embedding_dimensions"])),
+            qwen_chat_default_model=os.getenv("QWEN_CHAT_DEFAULT_MODEL", _DEFAULTS["qwen_chat_default_model"]),
+            qwen_chat_max_tokens=int(os.getenv("QWEN_CHAT_MAX_TOKENS", _DEFAULTS["qwen_chat_max_tokens"])),
+            qwen_reasoning_max_tokens=int(os.getenv("QWEN_REASONING_MAX_TOKENS", _DEFAULTS["qwen_reasoning_max_tokens"])),
+            qwen_memory_extraction_max_tokens=int(os.getenv("QWEN_MEMORY_EXTRACTION_MAX_TOKENS", _DEFAULTS["qwen_memory_extraction_max_tokens"])),
+            qwen_conflict_resolution_max_tokens=int(os.getenv("QWEN_CONFLICT_RESOLUTION_MAX_TOKENS", _DEFAULTS["qwen_conflict_resolution_max_tokens"])),
+            qwen_summary_max_tokens=int(os.getenv("QWEN_SUMMARY_MAX_TOKENS", _DEFAULTS["qwen_summary_max_tokens"])),
+            memory_recall_top_k=int(os.getenv("MEMORY_RECALL_TOP_K", _DEFAULTS["memory_recall_top_k"])),
+            memory_recall_vector_top_k=int(os.getenv("MEMORY_RECALL_VECTOR_TOP_K", _DEFAULTS["memory_recall_vector_top_k"])),
+            memory_recall_fallback_limit=int(os.getenv("MEMORY_RECALL_FALLBACK_LIMIT", _DEFAULTS["memory_recall_fallback_limit"])),
+            memory_extraction_include_assistant_response=os.getenv("MEMORY_EXTRACTION_INCLUDE_ASSISTANT_RESPONSE", _DEFAULTS["memory_extraction_include_assistant_response"]).lower() == "true",
+            memory_extraction_max_input_chars=int(os.getenv("MEMORY_EXTRACTION_MAX_INPUT_CHARS", _DEFAULTS["memory_extraction_max_input_chars"])),
+            memory_auto_approve_confidence=float(os.getenv("MEMORY_AUTO_APPROVE_CONFIDENCE", _DEFAULTS["memory_auto_approve_confidence"])),
+            memory_conflict_confirmation_enabled=os.getenv("MEMORY_CONFLICT_CONFIRMATION_ENABLED", _DEFAULTS["memory_conflict_confirmation_enabled"]).lower() == "true",
             qwen_require_live_embeddings=os.getenv("QWEN_REQUIRE_LIVE_EMBEDDINGS", "false").lower() == "true",
             pinecone_api_key=os.getenv("PINECONE_API_KEY", _DEFAULTS["pinecone_api_key"]),
             pinecone_host=os.getenv("PINECONE_HOST", _DEFAULTS["pinecone_host"]),

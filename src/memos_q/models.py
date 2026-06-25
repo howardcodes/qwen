@@ -14,11 +14,27 @@ class MemoryStatus(StrEnum):
 
     ACTIVE = "active"
     PENDING_REVIEW = "pending_review"
+    PENDING_CONFLICT_CONFIRMATION = "pending_conflict_confirmation"
     REJECTED = "rejected"
-    DEPRECATED = "deprecated"
     ARCHIVED = "archived"
-    POSSIBLY_CONFLICTING = "possibly_conflicting"
+    SUPERSEDED = "superseded"
     FORGOTTEN = "forgotten"
+    # Backward-compatible aliases for older rows/tests.
+    DEPRECATED = "superseded"
+    POSSIBLY_CONFLICTING = "pending_conflict_confirmation"
+
+
+class MemoryConflictStatus(StrEnum):
+    PENDING = "pending"
+    RESOLVED = "resolved"
+
+
+class MemoryConflictResolution(StrEnum):
+    ACCEPTED_CANDIDATE = "accepted_candidate"
+    KEPT_EXISTING = "kept_existing"
+    MERGED = "merged"
+    REJECTED_CANDIDATE = "rejected_candidate"
+    MANUAL_RESOLUTION = "manual_resolution"
 
 
 class MemoryType(StrEnum):
@@ -77,6 +93,7 @@ class Memory:
     updated_at: datetime = field(default_factory=utc_now)
     last_recalled_at: datetime | None = None
     approved_at: datetime | None = None
+    last_confirmed_at: datetime | None = None
     last_seen_at: datetime | None = None
     conflicting_memory_id: str | None = None
     conflict_reason: str | None = None
@@ -91,6 +108,24 @@ class Memory:
         self.stability_score = clamp_score(self.stability_score)
         self.sensitivity = self.sensitivity.lower()
         self.tags = {tag.lower() for tag in self.tags}
+
+
+@dataclass(slots=True)
+class MemoryConflict:
+    user_id: str
+    existing_memory_id: str
+    candidate_memory_id: str
+    conflict_type: str
+    existing_content: str
+    candidate_content: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+    status: MemoryConflictStatus = MemoryConflictStatus.PENDING
+    created_at: datetime = field(default_factory=utc_now)
+    resolved_at: datetime | None = None
+    resolution: str | None = None
+
+    def __post_init__(self) -> None:
+        self.status = MemoryConflictStatus(self.status)
 
 
 @dataclass(slots=True)
@@ -109,8 +144,6 @@ class MemoryEdge:
 
 @dataclass(slots=True)
 class RecallExplanation:
-    """Human-readable provenance and ranking details for a recalled memory."""
-
     source_session: str
     confidence_score: float
     timestamp: datetime
@@ -120,8 +153,6 @@ class RecallExplanation:
 
 @dataclass(slots=True)
 class RecallResult:
-    """A recalled memory plus its final score and explanation."""
-
     memory: Memory
     score: float
     explanation: RecallExplanation
@@ -129,8 +160,6 @@ class RecallResult:
 
 @dataclass(slots=True)
 class AuditEvent:
-    """Immutable audit event for memory lifecycle changes."""
-
     action: str
     actor: str
     memory_id: str
@@ -140,6 +169,4 @@ class AuditEvent:
 
 
 def clamp_score(value: float) -> float:
-    """Clamp a score to the inclusive [0, 1] range."""
-
     return max(0.0, min(1.0, float(value)))

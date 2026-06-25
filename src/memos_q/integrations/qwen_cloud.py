@@ -39,10 +39,11 @@ class QwenCloudClient:
         *,
         model: str | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> str:
         """Generate a response with Qwen3.5-Plus by default."""
 
-        payload = self._chat_payload(messages, model=model, temperature=temperature)
+        payload = self._chat_payload(messages, model=model, temperature=temperature, max_tokens=max_tokens)
         data = self._post("/chat/completions", payload)
         return data["choices"][0]["message"]["content"]
 
@@ -52,10 +53,11 @@ class QwenCloudClient:
         *,
         model: str | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> Iterator[str]:
         """Stream generated chat tokens from Qwen's OpenAI-compatible endpoint."""
 
-        payload = {**self._chat_payload(messages, model=model, temperature=temperature), "stream": True}
+        payload = {**self._chat_payload(messages, model=model, temperature=temperature, max_tokens=max_tokens), "stream": True}
         for event in self._post_stream("/chat/completions", payload):
             if event == "[DONE]":
                 break
@@ -75,11 +77,13 @@ class QwenCloudClient:
         *,
         model: str | None,
         temperature: float,
+        max_tokens: int | None,
     ) -> dict[str, Any]:
         return {
-            "model": model or self.config.qwen_reasoning_model,
+            "model": model or self.config.qwen_chat_default_model,
             "messages": [serialize_message(message) for message in messages],
             "temperature": temperature,
+            "max_tokens": max_tokens or self.config.qwen_chat_max_tokens,
         }
 
     def embed_texts(
@@ -124,6 +128,7 @@ class QwenCloudClient:
             ],
             model=self.config.qwen_flash_model,
             temperature=0,
+            max_tokens=self.config.qwen_conflict_resolution_max_tokens,
         ).strip()
 
     def vision_extract(self, *, image_url: str, prompt: str) -> str:
@@ -141,6 +146,7 @@ class QwenCloudClient:
             ],
             model=self.config.qwen_vl_model,
             temperature=0.1,
+            max_tokens=self.config.qwen_summary_max_tokens,
         )
 
     def create_batch(self, input_file_id: str, *, endpoint: str = "/v1/chat/completions") -> dict[str, Any]:
@@ -197,7 +203,7 @@ def build_qwen_agent(config: Settings = settings) -> Any:
     from qwen_agent.agents import Assistant
 
     llm_cfg = {
-        "model": config.qwen_reasoning_model,
+        "model": config.qwen_chat_default_model,
         "model_server": config.qwen_base_url,
         "api_key": config.qwen_api_key,
     }
@@ -205,6 +211,6 @@ def build_qwen_agent(config: Settings = settings) -> Any:
         llm=llm_cfg,
         system_message=(
             "You are MemOS-Q, an explainable memory operating system for AI agents. "
-            "Use memory provenance, confidence, and auditability in every response."
+            "Use memory provenance, confidence, and auditability in every response. Answer concisely by default. Do not produce long explanations unless the user asks for full code, comprehensive analysis, or detailed reasoning."
         ),
     )

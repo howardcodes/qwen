@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, Memory, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
+from memos_q.models import AuditEvent, Memory, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
 from memos_q.store import memory_snapshot
 
 
@@ -66,7 +66,8 @@ class PostgresMemoryStore:
                     expires_at TIMESTAMPTZ,
                     sensitivity TEXT NOT NULL DEFAULT 'low',
                     conflicting_memory_id TEXT,
-                    conflict_reason TEXT
+                    conflict_reason TEXT,
+                    last_confirmed_at TIMESTAMPTZ
                 )
                 """
             )
@@ -83,6 +84,19 @@ class PostgresMemoryStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS memory_conflicts (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    existing_memory_id TEXT NOT NULL REFERENCES memories(id),
+                    candidate_memory_id TEXT NOT NULL REFERENCES memories(id),
+                    conflict_type TEXT NOT NULL,
+                    existing_content TEXT NOT NULL,
+                    candidate_content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    resolved_at TIMESTAMPTZ,
+                    resolution TEXT
+                );
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id BIGSERIAL PRIMARY KEY,
                     action TEXT NOT NULL,
@@ -99,6 +113,8 @@ class PostgresMemoryStore:
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'low'")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS conflicting_memory_id TEXT")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS conflict_reason TEXT")
+            cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_confirmed_at TIMESTAMPTZ")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_conflicts_user_status ON memory_conflicts(user_id, status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_status ON memories(user_id, status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_type ON memories(user_id, memory_type)")
@@ -122,8 +138,8 @@ class PostgresMemoryStore:
                     importance_score, novelty_score, stability_score, confidence_reasons,
                     status, version, source_session, tags, metadata, created_at, updated_at,
                     last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity,
-                    conflicting_memory_id, conflict_reason
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    conflicting_memory_id, conflict_reason, last_confirmed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     memory.id,
@@ -150,6 +166,7 @@ class PostgresMemoryStore:
                     memory.sensitivity,
                     memory.conflicting_memory_id,
                     memory.conflict_reason,
+                    memory.last_confirmed_at,
                 ),
             )
             self._record_audit(cursor, "remember", actor, memory.id, None, memory_snapshot(memory))
@@ -165,7 +182,7 @@ class PostgresMemoryStore:
                 SELECT id, user_id, memory_type, content, confidence_score,
                        importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason
+                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason, last_confirmed_at
                 FROM memories
                 WHERE id = %s
                 """,
@@ -194,7 +211,7 @@ class PostgresMemoryStore:
                     importance_score = %s, novelty_score = %s, stability_score = %s,
                     confidence_reasons = %s, status = %s, version = %s, tags = %s,
                     metadata = %s, updated_at = %s, last_recalled_at = %s,
-                    approved_at = %s, last_seen_at = %s, expires_at = %s, embedding = %s, sensitivity = %s, conflicting_memory_id = %s, conflict_reason = %s
+                    approved_at = %s, last_seen_at = %s, expires_at = %s, embedding = %s, sensitivity = %s, conflicting_memory_id = %s, conflict_reason = %s, last_confirmed_at = %s
                 WHERE id = %s
                 """,
                 (
@@ -218,12 +235,53 @@ class PostgresMemoryStore:
                     memory.sensitivity,
                     memory.conflicting_memory_id,
                     memory.conflict_reason,
+                    memory.last_confirmed_at,
                     memory.id,
                 ),
             )
             self._record_audit(cursor, "update", actor, memory.id, previous, memory_snapshot(memory))
         self.connection.commit()
         return memory
+
+
+    def add_conflict(self, conflict: MemoryConflict) -> MemoryConflict:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO memory_conflicts (id, user_id, existing_memory_id, candidate_memory_id, conflict_type, existing_content, candidate_content, status, created_at, resolved_at, resolution)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (conflict.id, conflict.user_id, conflict.existing_memory_id, conflict.candidate_memory_id, conflict.conflict_type, conflict.existing_content, conflict.candidate_content, conflict.status.value, conflict.created_at, conflict.resolved_at, conflict.resolution),
+            )
+            self._record_audit(cursor, "conflict_create", "memory-conflict", conflict.candidate_memory_id, None, {"id": conflict.id, "status": conflict.status.value})
+        self.connection.commit()
+        return conflict
+
+    def get_conflict(self, conflict_id: str) -> MemoryConflict:
+        with self.connection.cursor() as cursor:
+            cursor.execute("""SELECT id, user_id, existing_memory_id, candidate_memory_id, conflict_type, existing_content, candidate_content, status, created_at, resolved_at, resolution FROM memory_conflicts WHERE id = %s""", (conflict_id,))
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(conflict_id)
+        return conflict_from_row(row)
+
+    def pending_conflict_for_user(self, user_id: str) -> MemoryConflict | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("""SELECT id, user_id, existing_memory_id, candidate_memory_id, conflict_type, existing_content, candidate_content, status, created_at, resolved_at, resolution FROM memory_conflicts WHERE user_id = %s AND status = 'pending' ORDER BY created_at DESC LIMIT 1""", (user_id,))
+            row = cursor.fetchone()
+        return conflict_from_row(row) if row else None
+
+    def resolve_conflict(self, conflict_id: str, *, resolution: str, actor: str = "memory-agent") -> MemoryConflict:
+        conflict = self.get_conflict(conflict_id)
+        conflict.status = MemoryConflictStatus.RESOLVED
+        conflict.resolution = resolution
+        conflict.resolved_at = utc_now()
+        with self.connection.cursor() as cursor:
+            cursor.execute("""UPDATE memory_conflicts SET status = %s, resolved_at = %s, resolution = %s WHERE id = %s""", (conflict.status.value, conflict.resolved_at, conflict.resolution, conflict.id))
+            self._record_audit(cursor, "conflict_resolve", actor, conflict.candidate_memory_id, None, {"id": conflict.id, "resolution": resolution})
+        self.connection.commit()
+        return conflict
 
     def add_edge(self, edge: MemoryEdge) -> MemoryEdge:
         """Persist a graph relationship between memories."""
@@ -322,7 +380,7 @@ class PostgresMemoryStore:
                 SELECT id, user_id, memory_type, content, confidence_score,
                        importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason
+                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason, last_confirmed_at
                 FROM memories
                 WHERE user_id = %s {status_clause}
                 ORDER BY created_at
@@ -341,7 +399,7 @@ class PostgresMemoryStore:
                 SELECT id, user_id, memory_type, content, confidence_score,
                        importance_score, novelty_score, stability_score, confidence_reasons, status,
                        version, source_session, tags, metadata, created_at,
-                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason
+                       updated_at, last_recalled_at, approved_at, last_seen_at, expires_at, embedding, sensitivity, conflicting_memory_id, conflict_reason, last_confirmed_at
                 FROM memories
                 WHERE user_id = %s {status_clause} AND embedding IS NOT NULL
                 ORDER BY embedding <=> %s::vector
@@ -410,6 +468,15 @@ class PineconeVectorIndex:
         }
         self._request("POST", "/vectors/upsert", json=payload)
 
+    def delete_memory(self, memory_id: str) -> None:
+        if not self.enabled:
+            return
+        self._request("POST", "/vectors/delete", json={"ids": [memory_id], "namespace": self.config.pinecone_namespace})
+
+    def list_memory_ids(self) -> list[str]:
+        # Pinecone serverless has no cheap full scan API; reconciliation reports missing vectors and deletes known stale ids via Postgres transitions.
+        return []
+
     def update_memory_status(self, memory: Memory) -> None:
         """Update vector metadata after lifecycle changes."""
 
@@ -464,16 +531,19 @@ class AliCloudMemoryStore:
 
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
         saved = self.records.add_memory(memory, actor=actor)
-        self.vectors.upsert_memory(saved)
+        self.sync_memory_vector(saved)
         return saved
 
     def update_memory(self, memory_id: str, *, actor: str = "memory-agent", **changes: object) -> Memory:
         updated = self.records.update_memory(memory_id, actor=actor, **changes)
-        if updated.embedding:
-            self.vectors.upsert_memory(updated)
-        else:
-            self.vectors.update_memory_status(updated)
+        self.sync_memory_vector(updated)
         return updated
+
+    def sync_memory_vector(self, memory: Memory) -> None:
+        if memory.status == MemoryStatus.ACTIVE:
+            self.vectors.upsert_memory(memory)
+        else:
+            self.vectors.delete_memory(memory.id)
 
     def vector_search(self, user_id: str, query_embedding: list[float], *, limit: int = 20, include_inactive: bool = False) -> list[Memory]:
         ids = self.vectors.search_memory_ids(user_id, query_embedding, limit=limit, include_inactive=include_inactive)
@@ -563,6 +633,7 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         sensitivity,
         conflicting_memory_id,
         conflict_reason,
+        last_confirmed_at,
     ) = row
     if isinstance(tags, str):
         tags = json.loads(tags)
@@ -597,4 +668,13 @@ def memory_from_row(row: Iterable[Any]) -> Memory:
         sensitivity=sensitivity or "low",
         conflicting_memory_id=conflicting_memory_id,
         conflict_reason=conflict_reason,
+        last_confirmed_at=last_confirmed_at,
+    )
+
+
+def conflict_from_row(row: Iterable[Any]) -> MemoryConflict:
+    return MemoryConflict(
+        id=row[0], user_id=row[1], existing_memory_id=row[2], candidate_memory_id=row[3],
+        conflict_type=row[4], existing_content=row[5], candidate_content=row[6], status=MemoryConflictStatus(row[7]),
+        created_at=row[8], resolved_at=row[9], resolution=row[10],
     )

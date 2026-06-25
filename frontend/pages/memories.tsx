@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '../components/ui/button'
 import { Card } from '../components/ui/card'
-import { approveMemory, deleteMemory, editMemory, getMemories, MemoryRecord, rejectMemory } from '../lib/api'
+import { approveMemory, archiveMemory, deleteMemory, editMemory, getMemories, MemoryRecord, rejectMemory } from '../lib/api'
 
 const tabs = [
   ['Active', 'active'],
   ['Pending Review', 'pending_review'],
-  ['Conflicts', 'possibly_conflicting'],
+  ['Conflicts', 'pending_conflict_confirmation'],
   ['Rejected', 'rejected'],
-  ['Deprecated', 'deprecated'],
+  ['Superseded', 'superseded'],
   ['Archived', 'archived'],
   ['Forgotten', 'forgotten']
 ]
@@ -94,6 +94,7 @@ export default function MemoriesPage() {
                     <Button onClick={() => act(() => approveMemory(userId, memory.id))}>Approve</Button>
                     <Button onClick={() => act(() => rejectMemory(userId, memory.id))}>Reject</Button>
                     <Button onClick={() => { const content = window.prompt('Edit memory', memory.content); if (content) act(() => editMemory(userId, memory.id, content)) }}>Edit</Button>
+                    <Button onClick={() => act(() => archiveMemory(userId, memory.id))}>Archive</Button>
                     <Button onClick={() => act(() => deleteMemory(userId, memory.id))}>Delete</Button>
                   </td>
                 </tr>

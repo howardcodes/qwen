@@ -72,3 +72,22 @@ def test_qwen_chat_stream_yields_openai_compatible_delta_tokens():
     assert call["stream"] is True
     assert call["json"]["stream"] is True
     assert call["json"]["model"] == "qwen-test"
+
+from memos_q.config import Settings
+from memos_q.integrations.qwen_cloud import QwenCloudClient, QwenMessage
+
+
+def test_qwen_chat_payload_uses_flash_default_and_max_tokens():
+    client = QwenCloudClient(Settings(qwen_chat_default_model="qwen3.5-flash", qwen_chat_max_tokens=800))
+    payload = client._chat_payload([QwenMessage("user", "hi")], model=None, temperature=0.1, max_tokens=None)
+
+    assert payload["model"] == "qwen3.5-flash"
+    assert payload["max_tokens"] == 800
+
+
+def test_qwen_chat_payload_allows_task_specific_token_limit():
+    client = QwenCloudClient(Settings(qwen_chat_default_model="qwen3.5-flash", qwen_memory_extraction_max_tokens=500))
+    payload = client._chat_payload([QwenMessage("user", "extract")], model="qwen3.5-flash", temperature=0, max_tokens=300)
+
+    assert payload["model"] == "qwen3.5-flash"
+    assert payload["max_tokens"] == 300

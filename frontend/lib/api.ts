@@ -136,3 +136,9 @@ export async function deleteMemory(userId: string, memoryId: string) {
   if (!response.ok) throw new Error(await response.text())
   return response.json()
 }
+
+export async function archiveMemory(userId: string, memoryId: string) {
+  const response = await fetch(`${API_BASE_URL}/users/me/memories/${memoryId}/archive`, { method: 'POST', headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
