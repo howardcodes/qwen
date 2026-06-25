@@ -15,6 +15,8 @@ class MemoryStatus(StrEnum):
     ACTIVE = "active"
     PENDING_REVIEW = "pending_review"
     REJECTED = "rejected"
+    DEPRECATED = "deprecated"
+    ARCHIVED = "archived"
     POSSIBLY_CONFLICTING = "possibly_conflicting"
     FORGOTTEN = "forgotten"
 

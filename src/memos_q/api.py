@@ -148,10 +148,10 @@ async def recall(request: RecallRequest, user_id: str = Depends(authenticated_us
 
 @app.post("/agent/chat")
 async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authenticated_user)) -> StreamingResponse:
-    recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=3)
+    recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=5, include_pending_review=True)
     memory_context = format_memory_context(recalled)
     messages = [
-        QwenMessage("system", "Use only relevant private memories. Ask before saving sensitive or uncertain facts."),
+        QwenMessage("system", "Use relevant private memories. Treat pending_review memories as unapproved: mention them only as pending confirmation, never as established facts. Ask before saving sensitive or uncertain facts."),
         QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
     ]
 
@@ -306,7 +306,10 @@ def serialize_memory(memory: Any) -> dict[str, Any]:
 def format_memory_context(recalled: list[Any]) -> str:
     if not recalled:
         return "No prior memories."
-    return "\n".join(f"- fact: {item.memory.content}\n  confidence: {item.memory.confidence_score:.2f}\n  source: {item.memory.source_session}\n  updated_at: {item.memory.updated_at.isoformat()}" for item in recalled)
+    return "\n".join(
+        f"- fact: {item.memory.content}\n  status: {item.memory.status.value}\n  confidence: {item.memory.confidence_score:.2f}\n  source: {item.memory.source_session}\n  updated_at: {item.memory.updated_at.isoformat()}"
+        for item in recalled
+    )
 
 
 def status_for_extracted_memory(memory: ExtractedMemory) -> MemoryStatus | None:

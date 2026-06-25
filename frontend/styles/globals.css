@@ -10,5 +10,21 @@ body,
 }
 
 body {
-  @apply bg-background text-foreground;
+  @apply bg-background text-foreground antialiased;
+  background-image:
+    radial-gradient(circle at top left, rgba(14, 165, 233, 0.10), transparent 34rem),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+}
+
+input,
+textarea {
+  @apply text-slate-950 placeholder:text-slate-400;
+}
+
+.react-flow__node {
+  @apply rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm;
+}
+
+.react-flow__controls {
+  @apply overflow-hidden rounded-xl border border-slate-200 shadow-sm;
 }

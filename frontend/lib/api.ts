@@ -26,11 +26,22 @@ export async function getIntegrationStatus(): Promise<IntegrationStatus> {
   return response.json()
 }
 
-export async function streamAgentMessage(userId: string, message: string, onToken: (token: string) => void): Promise<string> {
+type StreamAgentOptions = {
+  signal?: AbortSignal
+  idleTimeoutMs?: number
+}
+
+export async function streamAgentMessage(
+  userId: string,
+  message: string,
+  onToken: (token: string) => void,
+  options: StreamAgentOptions = {}
+): Promise<string> {
   const response = await fetch(`${API_BASE_URL}/agent/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
-    body: JSON.stringify({ message })
+    body: JSON.stringify({ message }),
+    signal: options.signal
   })
   if (!response.ok) {
     throw new Error(await response.text())
@@ -41,13 +52,36 @@ export async function streamAgentMessage(userId: string, message: string, onToke
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
+  const idleTimeoutMs = options.idleTimeoutMs ?? 90000
   let fullResponse = ''
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    const token = decoder.decode(value, { stream: true })
-    fullResponse += token
-    onToken(token)
+  let timedOut = false
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  const resetIdleTimeout = () => {
+    if (timeoutId) clearTimeout(timeoutId)
+    timeoutId = setTimeout(() => {
+      timedOut = true
+      reader.cancel('Agent stream timed out waiting for the next token').catch(() => undefined)
+    }, idleTimeoutMs)
+  }
+
+  try {
+    resetIdleTimeout()
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      resetIdleTimeout()
+      const token = decoder.decode(value, { stream: true })
+      fullResponse += token
+      onToken(token)
+    }
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+    reader.releaseLock()
+  }
+
+  if (timedOut) {
+    throw new Error('Agent stream timed out waiting for the next token. You can send another message now.')
   }
 
   const remaining = decoder.decode()

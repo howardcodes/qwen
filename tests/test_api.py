@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from memos_q.api import app, memory_os
 from memos_q.store import InMemoryStore
+from memos_q.models import MemoryStatus
 
 
 class TestEmbeddingProvider:
@@ -75,3 +76,30 @@ def test_integrations_status_reports_runtime_sections():
     assert "langfuse_configured" in payload["monitoring"]
     assert payload["monitoring"]["prometheus_metrics_path"] == "/metrics"
     assert payload["models"]["reasoning_model"]
+
+
+
+def test_agent_chat_includes_pending_review_memory_in_context(monkeypatch):
+    client = TestClient(app)
+    memory_os.remember(
+        user_id="demo-user",
+        content="User's name is Mark",
+        source_session="session-name",
+        status=MemoryStatus.PENDING_REVIEW,
+    )
+    memory_os.remember(user_id="demo-user", content="User likes to play badminton", source_session="session-sport")
+    captured = {}
+
+    def fake_stream(messages, model=None):
+        captured["messages"] = messages
+        yield "ok"
+
+    monkeypatch.setattr("memos_q.api.qwen_client.chat_stream", fake_stream)
+    monkeypatch.setattr("memos_q.api.enqueue_memory_evolution", lambda **kwargs: None)
+
+    response = client.post("/agent/chat", headers={"x-user-id": "demo-user"}, json={"message": "What is my name?"})
+
+    assert response.status_code == 200
+    prompt = captured["messages"][1].content
+    assert "User's name is Mark" in prompt
+    assert "status: pending_review" in prompt
