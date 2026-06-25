@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 
-from .models import AuditEvent, Memory, MemoryEdge, MemoryStatus, RelationType, utc_now
+from .models import AuditEvent, Memory, MemoryConflict, MemoryConflictResolution, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
 from .scoring import cosine_similarity
 
 
@@ -16,6 +16,7 @@ class InMemoryStore:
         self._memories: dict[str, Memory] = {}
         self._edges: dict[str, MemoryEdge] = {}
         self._audit_log: list[AuditEvent] = []
+        self._conflicts: dict[str, MemoryConflict] = {}
         self._by_user: dict[str, set[str]] = defaultdict(set)
 
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
@@ -67,6 +68,35 @@ class InMemoryStore:
             key=lambda memory: cosine_similarity(query_embedding, memory.embedding),
             reverse=True,
         )[:limit]
+
+    def add_conflict(self, conflict: MemoryConflict) -> MemoryConflict:
+        self._conflicts[conflict.id] = conflict
+        self.record_audit("conflict_create", "memory-conflict", conflict.candidate_memory_id, None, conflict_snapshot(conflict))
+        return conflict
+
+    def get_conflict(self, conflict_id: str) -> MemoryConflict:
+        return self._conflicts[conflict_id]
+
+    def pending_conflict_for_user(self, user_id: str) -> MemoryConflict | None:
+        pending = [c for c in self._conflicts.values() if c.user_id == user_id and c.status == MemoryConflictStatus.PENDING]
+        return sorted(pending, key=lambda c: c.created_at)[-1] if pending else None
+
+    def resolve_conflict(self, conflict_id: str, *, resolution: str, actor: str = "memory-agent") -> MemoryConflict:
+        conflict = self.get_conflict(conflict_id)
+        previous = conflict_snapshot(conflict)
+        conflict.status = MemoryConflictStatus.RESOLVED
+        conflict.resolution = resolution
+        conflict.resolved_at = utc_now()
+        self.record_audit("conflict_resolve", actor, conflict.candidate_memory_id, previous, conflict_snapshot(conflict))
+        return conflict
+
+    def list_conflicts(self, user_id: str | None = None, *, include_resolved: bool = False) -> list[MemoryConflict]:
+        conflicts = list(self._conflicts.values())
+        if user_id is not None:
+            conflicts = [c for c in conflicts if c.user_id == user_id]
+        if not include_resolved:
+            conflicts = [c for c in conflicts if c.status == MemoryConflictStatus.PENDING]
+        return sorted(conflicts, key=lambda c: c.created_at)
 
     def add_edge(self, edge: MemoryEdge) -> MemoryEdge:
         self._edges[edge.id] = edge
@@ -146,10 +176,29 @@ def memory_snapshot(memory: Memory) -> dict[str, object]:
         "embedding_dimensions": len(memory.embedding or []),
         "sensitivity": memory.sensitivity,
         "approved_at": memory.approved_at.isoformat() if memory.approved_at else None,
+        "last_confirmed_at": memory.last_confirmed_at.isoformat() if memory.last_confirmed_at else None,
+        "key": memory.metadata.get("key"),
+        "value": memory.metadata.get("value"),
         "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None,
         "conflicting_memory_id": memory.conflicting_memory_id,
         "conflict_reason": memory.conflict_reason,
         "status": memory.status.value,
         "version": memory.version,
         "tags": sorted(memory.tags),
+    }
+
+
+def conflict_snapshot(conflict: MemoryConflict) -> dict[str, object]:
+    return {
+        "id": conflict.id,
+        "user_id": conflict.user_id,
+        "existing_memory_id": conflict.existing_memory_id,
+        "candidate_memory_id": conflict.candidate_memory_id,
+        "conflict_type": conflict.conflict_type,
+        "existing_content": conflict.existing_content,
+        "candidate_content": conflict.candidate_content,
+        "status": conflict.status.value,
+        "created_at": conflict.created_at.isoformat(),
+        "resolved_at": conflict.resolved_at.isoformat() if conflict.resolved_at else None,
+        "resolution": conflict.resolution,
     }

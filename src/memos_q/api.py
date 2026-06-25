@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import settings
-from .engine import MemoryOS
+from .engine import MemoryCandidate, MemoryOS
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
 from .models import MemoryStatus, MemoryType
@@ -66,6 +66,10 @@ class MemoryPatchRequest(BaseModel):
 class ExtractedMemory(BaseModel):
     content: str = Field(..., min_length=1, max_length=500)
     type: MemoryType
+    key: str | None = None
+    value: str | None = None
+    source: str = "user_message"
+    should_remember: bool = True
     confidence: float = Field(..., ge=0, le=1)
     sensitivity: str = Field(..., pattern="^(low|medium|high)$")
     reason: str = Field(default="", max_length=500)
@@ -148,29 +152,38 @@ async def recall(request: RecallRequest, user_id: str = Depends(authenticated_us
 
 @app.post("/agent/chat")
 async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authenticated_user)) -> StreamingResponse:
-    recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=5, include_pending_review=True)
+    request_id = f"req-{int(time.time() * 1000)}"
+    log_timing(request_id, "request_start", 0)
+    pending_resolution = await run_in_threadpool(memory_os.resolve_pending_conflict, user_id, request.message, actor="user")
+    if pending_resolution is not None and pending_resolution.action in {"accepted_candidate", "kept_existing"}:
+        text = "Got it — I updated your memory." if pending_resolution.action == "accepted_candidate" else "Got it — I kept the existing memory."
+        return StreamingResponse(iter([text]), media_type="text/plain; charset=utf-8")
+
+    start = time.perf_counter()
+    recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False)
+    log_timing(request_id, "memory_recall", (time.perf_counter() - start) * 1000)
     memory_context = format_memory_context(recalled)
     messages = [
-        QwenMessage("system", "Use relevant private memories. Treat pending_review memories as unapproved: mention them only as pending confirmation, never as established facts. Ask before saving sensitive or uncertain facts."),
+        QwenMessage("system", "Use relevant private ACTIVE memories only. Answer concisely by default. Do not produce long explanations unless the user asks for full code, comprehensive analysis, or detailed reasoning. Ask before saving sensitive or uncertain facts."),
         QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
     ]
 
     def token_stream():
         response_parts: list[str] = []
+        first = True
+        start_request = time.perf_counter(); log_timing(request_id, "qwen_request_start", 0, model=settings.qwen_chat_default_model)
         try:
-            for token in qwen_client.chat_stream(messages, model=settings.qwen_reasoning_model):
+            for token in qwen_client.chat_stream(messages, model=settings.qwen_chat_default_model, max_tokens=settings.qwen_chat_max_tokens):
+                if first:
+                    log_timing(request_id, "qwen_first_token", (time.perf_counter() - start_request) * 1000, model=settings.qwen_chat_default_model); first = False
                 response_parts.append(token)
                 yield token
         finally:
             assistant_response = "".join(response_parts)
+            log_timing(request_id, "qwen_complete", (time.perf_counter() - start_request) * 1000, model=settings.qwen_chat_default_model, output_tokens=len(assistant_response.split()))
             if assistant_response:
-                enqueue_memory_evolution(
-                    user_id=user_id,
-                    source_session=request.source_session,
-                    user_message=request.message,
-                    assistant_response=assistant_response,
-                    memory_context=memory_context,
-                )
+                enqueue_memory_evolution(user_id=user_id, source_session=request.source_session, user_message=request.message, assistant_response=assistant_response, memory_context=memory_context)
+            log_timing(request_id, "request_complete", 0)
 
     return StreamingResponse(token_stream(), media_type="text/plain; charset=utf-8")
 
@@ -282,12 +295,24 @@ async def edit_memory(memory_id: str, request: MemoryPatchRequest, user_id: str 
     return serialize_memory(memory)
 
 
+@app.post("/users/me/memories/{memory_id}/archive")
+async def archive_memory(memory_id: str, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    memory = await run_in_threadpool(memory_os.archive, user_id, memory_id, actor="user")
+    refresh_memory_gauges(user_id)
+    return serialize_memory(memory)
+
+
 @app.delete("/users/me/memories/{memory_id}")
 async def delete_memory(memory_id: str, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
     memory = await run_in_threadpool(memory_os.forget, user_id, memory_id, actor="user")
     metrics.memories_deleted_total.inc()
     refresh_memory_gauges(user_id)
     return serialize_memory(memory)
+
+
+@app.post("/admin/reconcile-vectors")
+async def reconcile_vectors(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    return await run_in_threadpool(memory_os.reconcile_vectors)
 
 
 @app.post("/users/me/maintenance")
@@ -343,13 +368,13 @@ def extract_durable_memories(user_message: str, assistant_response: str, convers
 
     prompt = (
         "Extract durable memories from the user message, assistant response, and context. "
-        "Return only a JSON array of objects with content, type, confidence, sensitivity, reason. "
+        "Return only a JSON array of objects with content, type, key, value, confidence, sensitivity, source, should_remember, reason. "
         "Allowed types: preference, user_fact, project_context, task, workflow. "
         "Allowed sensitivity: low, medium, high.\n"
-        f"Context:\n{conversation_context}\nUser Message:\n{user_message}\nAssistant Response:\n{assistant_response}"
+        f"Context:\n{conversation_context[:settings.memory_extraction_max_input_chars]}\nUser Message:\n{user_message[:settings.memory_extraction_max_input_chars]}" + (f"\nAssistant Response:\n{assistant_response[:settings.memory_extraction_max_input_chars]}" if settings.memory_extraction_include_assistant_response else "")
     )
     try:
-        raw = qwen_client.chat([QwenMessage("system", "Return strict JSON only."), QwenMessage("user", prompt)], temperature=0)
+        raw = qwen_client.chat([QwenMessage("system", "Return strict JSON only."), QwenMessage("user", prompt)], model=settings.qwen_flash_model, temperature=0, max_tokens=settings.qwen_memory_extraction_max_tokens)
         data = json.loads(raw)
         return [ExtractedMemory.model_validate(item) for item in data][:5]
     except Exception:
@@ -357,8 +382,12 @@ def extract_durable_memories(user_message: str, assistant_response: str, convers
         return []
 
 
+def log_timing(request_id: str, stage: str, duration_ms: float, **extra: Any) -> None:
+    payload = {"request_id": request_id, "stage": stage, "duration_ms": round(duration_ms, 2), **extra}
+    print(json.dumps(payload, default=str))
+
 def refresh_memory_gauges(user_id: str) -> None:
     memories = memory_os.inspect(user_id, include_inactive=True)
     metrics.active_memory_count.set(sum(1 for item in memories if item.status == MemoryStatus.ACTIVE))
     metrics.pending_review_count.set(sum(1 for item in memories if item.status == MemoryStatus.PENDING_REVIEW))
-    metrics.conflicting_memory_count.set(sum(1 for item in memories if item.status == MemoryStatus.POSSIBLY_CONFLICTING))
+    metrics.conflicting_memory_count.set(sum(1 for item in memories if item.status == MemoryStatus.PENDING_CONFLICT_CONFIRMATION))

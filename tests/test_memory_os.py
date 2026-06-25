@@ -133,3 +133,84 @@ def test_pending_review_recall_uses_record_fallback_when_vector_index_misses():
     contents = [result.memory.content for result in memory_os.recall("user-1", "What is my name?", include_pending_review=True)]
 
     assert "User's name is Mark" in contents
+
+class RecordingVectorIndex:
+    def __init__(self):
+        self.ids = set()
+        self.upserts = []
+        self.deletes = []
+    def upsert_memory(self, memory):
+        self.ids.add(memory.id); self.upserts.append(memory.id)
+    def delete_memory(self, memory_id):
+        self.ids.discard(memory_id); self.deletes.append(memory_id)
+    def list_memory_ids(self):
+        return sorted(self.ids)
+
+
+def test_structured_non_conflicting_memory_auto_active_and_upserted():
+    vectors = RecordingVectorIndex()
+    memory_os = MemoryOS(embedding_provider=RecordingEmbeddingProvider(), vector_index=vectors, fallback_embedding_dimensions=2)
+
+    result = memory_os.ingest_candidate(
+        user_id="user-1",
+        candidate=__import__("memos_q.engine", fromlist=["MemoryCandidate"]).MemoryCandidate(
+            content="User's name is Mark.", type="user_fact", key="profile.name", value="Mark", confidence=0.98, sensitivity="low"
+        ),
+        source_session="session-1",
+    )
+
+    assert result.action == "created"
+    assert result.memory.status == MemoryStatus.ACTIVE
+    assert result.memory.id in vectors.ids
+
+
+def test_duplicate_structured_memory_does_not_create_duplicate_row():
+    from memos_q.engine import MemoryCandidate
+    memory_os = build_memory_os()
+    memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s1")
+    result = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("My name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
+
+    assert result.action == "duplicate"
+    assert len(memory_os.inspect("user-1", include_inactive=True)) == 1
+
+
+def test_conflict_confirmation_accept_and_reject_paths_sync_vectors():
+    from memos_q.engine import MemoryCandidate
+    vectors = RecordingVectorIndex()
+    memory_os = MemoryOS(embedding_provider=RecordingEmbeddingProvider(), vector_index=vectors, fallback_embedding_dimensions=2)
+    old = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Joshua.", "user_fact", "profile.name", "Joshua", 0.98), source_session="s1").memory
+    conflict = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
+
+    assert conflict.action == "conflict"
+    assert conflict.memory.status == MemoryStatus.PENDING_CONFLICT_CONFIRMATION
+    assert "Joshua" in conflict.prompt and "Mark" in conflict.prompt
+    assert conflict.memory.id not in vectors.ids
+
+    accepted = memory_os.resolve_pending_conflict("user-1", "Yes update it")
+    memories = {m.id: m for m in memory_os.inspect("user-1", include_inactive=True)}
+    assert accepted.action == "accepted_candidate"
+    assert memories[old.id].status == MemoryStatus.SUPERSEDED
+    assert memories[conflict.memory.id].status == MemoryStatus.ACTIVE
+    assert old.id not in vectors.ids and conflict.memory.id in vectors.ids
+
+    memory_os = MemoryOS(embedding_provider=RecordingEmbeddingProvider(), vector_index=RecordingVectorIndex(), fallback_embedding_dimensions=2)
+    old = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Joshua.", "user_fact", "profile.name", "Joshua", 0.98), source_session="s1").memory
+    conflict = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
+    rejected = memory_os.resolve_pending_conflict("user-1", "No, keep Joshua")
+    memories = {m.id: m for m in memory_os.inspect("user-1", include_inactive=True)}
+    assert rejected.action == "kept_existing"
+    assert memories[old.id].status == MemoryStatus.ACTIVE
+    assert memories[conflict.memory.id].status == MemoryStatus.REJECTED
+
+
+def test_reconciliation_fixes_missing_and_stale_vectors():
+    vectors = RecordingVectorIndex()
+    memory_os = MemoryOS(embedding_provider=RecordingEmbeddingProvider(), vector_index=vectors, fallback_embedding_dimensions=2)
+    active = memory_os.remember(user_id="user-1", content="User prefers Python.", source_session="s1")
+    vectors.ids = {"stale-id"}
+
+    report = memory_os.reconcile_vectors()
+
+    assert active.id in vectors.ids
+    assert "stale-id" not in vectors.ids
+    assert report["fixed"] == 2

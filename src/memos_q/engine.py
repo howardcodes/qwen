@@ -1,421 +1,283 @@
-"""Core memory operating system implementation.
-
-- MemoryOS manages memories for an AI agent:
-    - remember(): create a new memory with quality scoring and conflict resolution
-    - recall(): retrieve relevant memories with explainable scoring signals
-    - forget(): mark a memory as forgotten while retaining audit history
-    - inspect(): list a user's memories for transparency controls
-    - maintenance(): run autonomous memory maintenance to merge duplicates, promote stable facts, decay low-stability memories, and archive stale memories
-
-
-"""
+"""Core memory operating system implementation."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 import json
+import re
 from typing import Protocol
 
+from .config import settings
 from .models import (
-    Memory,
-    MemoryEdge,
-    MemoryStatus,
-    MemoryType,
-    RecallExplanation,
-    RecallResult,
-    RelationType,
-    clamp_score,
-    utc_now,
+    Memory, MemoryConflict, MemoryConflictResolution, MemoryEdge, MemoryStatus,
+    MemoryType, RecallExplanation, RecallResult, RelationType, clamp_score, utc_now,
 )
 from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, quality_scores, tokenize
 from .store import InMemoryStore
 
 
-class ConflictDetector(Protocol):
-    """Provider interface for Qwen semantic conflict checks."""
+ACTIVE_ONLY_VECTOR_STATUSES = {MemoryStatus.ACTIVE}
 
-    def chat(self, messages: Sequence[object], *, model: str | None = None, temperature: float = 0.2) -> str:
-        """Return a JSON conflict decision."""
+
+@dataclass(slots=True)
+class MemoryCandidate:
+    content: str
+    type: MemoryType | str
+    key: str | None = None
+    value: str | None = None
+    confidence: float = 0.75
+    sensitivity: str = "low"
+    source: str = "user_message"
+    should_remember: bool = True
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class IngestionResult:
+    action: str
+    memory: Memory | None = None
+    existing_memory: Memory | None = None
+    conflict: MemoryConflict | None = None
+    prompt: str | None = None
+
+
+class ConflictDetector(Protocol):
+    def chat(self, messages: Sequence[object], *, model: str | None = None, temperature: float = 0.2, max_tokens: int | None = None) -> str: ...
 
 
 class EmbeddingProvider(Protocol):
-    """Provider interface for QwenCloud/Alibaba text embeddings."""
+    def embed_text(self, text: str) -> list[float]: ...
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]: ...
 
-    def embed_text(self, text: str) -> list[float]:
-        """Embed one text value."""
 
-    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed multiple text values preserving input order."""
+class VectorIndex(Protocol):
+    def upsert_memory(self, memory: Memory) -> None: ...
+    def delete_memory(self, memory_id: str) -> None: ...
+    def list_memory_ids(self) -> list[str]: ...
 
 
 class MemoryOS:
-    """Self-correcting memory manager for AI agents."""
-
-    def __init__(
-        self,
-        store: InMemoryStore | None = None,
-        *,
-        embedding_provider: EmbeddingProvider | None = None,
-        require_live_embeddings: bool = False,
-        fallback_embedding_dimensions: int = 1024,
-        conflict_detector: ConflictDetector | None = None,
-    ) -> None:
+    def __init__(self, store: InMemoryStore | None = None, *, embedding_provider: EmbeddingProvider | None = None,
+                 require_live_embeddings: bool = False, fallback_embedding_dimensions: int = 1024,
+                 conflict_detector: ConflictDetector | None = None, vector_index: VectorIndex | None = None) -> None:
         self.store = store or InMemoryStore()
         self.embedding_provider = embedding_provider
         self.require_live_embeddings = require_live_embeddings
         self.fallback_embedding_dimensions = fallback_embedding_dimensions
         self.conflict_detector = conflict_detector
+        self.vector_index = vector_index
 
-    def remember(
-        self,
-        *,
-        user_id: str,
-        content: str,
-        memory_type: MemoryType | str = MemoryType.EPISODIC,
-        source_session: str,
-        tags: Iterable[str] = (),
-        confidence_score: float | None = None,
-        importance_score: float | None = None,
-        novelty_score: float | None = None,
-        stability_score: float | None = None,
-        metadata: dict[str, object] | None = None,
-        confidence_reasons: list[str] | None = None,
-        status: MemoryStatus = MemoryStatus.ACTIVE,
-        sensitivity: str = "low",
-        actor: str = "memory-agent",
-    ) -> Memory:
-        """Create a memory with duplicate and conflict lifecycle controls."""
-
-        existing = self.store.list_memories(user_id)
-        scores = quality_scores(content, existing) # KIV In production, this would be a more sophisticated scoring function possibly involving ML models
-        memory = Memory(
-            user_id=user_id,
-            content=content,
-            memory_type=memory_type,
-            source_session=source_session,
+    def remember(self, *, user_id: str, content: str, memory_type: MemoryType | str = MemoryType.EPISODIC,
+                 source_session: str, tags: Iterable[str] = (), confidence_score: float | None = None,
+                 importance_score: float | None = None, novelty_score: float | None = None,
+                 stability_score: float | None = None, metadata: dict[str, object] | None = None,
+                 confidence_reasons: list[str] | None = None, status: MemoryStatus = MemoryStatus.ACTIVE,
+                 sensitivity: str = "low", actor: str = "memory-agent") -> Memory:
+        scores = quality_scores(content, self.store.list_memories(user_id))
+        memory = Memory(user_id=user_id, content=content, memory_type=memory_type, source_session=source_session,
             confidence_score=confidence_score if confidence_score is not None else float(scores["confidence"]),
             importance_score=importance_score if importance_score is not None else float(scores["importance"]),
             novelty_score=novelty_score if novelty_score is not None else float(scores["novelty"]),
             stability_score=stability_score if stability_score is not None else float(scores["stability"]),
-            tags=set(tags),
-            metadata=dict(metadata or {}),
-            confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
-            embedding=self._embed_text(content),
-            status=status,
-            sensitivity=sensitivity,
-            approved_at=utc_now() if status == MemoryStatus.ACTIVE else None,
-            last_seen_at=utc_now(),
-        )
-        duplicate = self._handle_duplicate(memory, actor=actor)
-        if duplicate is not None:
-            return duplicate
-        self._mark_conflicts(memory, actor=actor)
+            tags=set(tags), metadata=dict(metadata or {}), confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
+            embedding=self._embed_text(content), status=status, sensitivity=sensitivity,
+            approved_at=utc_now() if status == MemoryStatus.ACTIVE else None, last_confirmed_at=utc_now() if status == MemoryStatus.ACTIVE else None,
+            last_seen_at=utc_now())
         self.store.add_memory(memory, actor=actor)
+        # Legacy semantic conflict handling for direct remember() calls. Structured ingestion uses confirmation instead.
+        for old in self.store.list_memories(user_id):
+            if old.id == memory.id or old.status != MemoryStatus.ACTIVE:
+                continue
+            if _subject_key(memory.content) and _subject_key(memory.content) == _subject_key(old.content) and keyword_score(memory.content, old) < 0.85:
+                self.store.update_memory(old.id, actor="conflict-resolver", status=MemoryStatus.SUPERSEDED)
+                self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=old.id, relation_type=RelationType.CONTRADICTS))
+                self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=old.id, relation_type=RelationType.SUPERSEDES))
+                self.sync_memory_vector(old)
+        self.sync_memory_vector(memory)
         return memory
 
-    def recall(
-        self,
-        user_id: str,
-        query: str,
-        *,
-        query_tags: Iterable[str] = (),
-        limit: int = 5,
-        include_pending_review: bool = False,
-    ) -> list[RecallResult]:
-        """Return ranked memories with explainable recall metadata.
+    def ingest_candidate(self, *, user_id: str, candidate: MemoryCandidate, source_session: str, actor: str = "memory-agent") -> IngestionResult:
+        if not candidate.should_remember:
+            return IngestionResult("skipped")
+        content, key, value = normalize_candidate(candidate)
+        same_key = [m for m in self.store.list_memories(user_id) if m.memory_type == MemoryType(candidate.type) and m.metadata.get("key") == key]
+        for old in same_key:
+            if values_equal(str(old.metadata.get("value", "")), value):
+                self.store.update_memory(old.id, actor=actor, last_seen_at=utc_now(), last_confirmed_at=utc_now(), confidence_score=max(old.confidence_score, candidate.confidence))
+                self.sync_memory_vector(old)
+                return IngestionResult("duplicate", memory=old, existing_memory=old)
+        if same_key:
+            existing = same_key[0]
+            memory = self.remember(user_id=user_id, content=content, memory_type=candidate.type, source_session=source_session,
+                tags={"agent", "extracted", "conflict"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value},
+                confidence_score=candidate.confidence, sensitivity=candidate.sensitivity, status=MemoryStatus.PENDING_CONFLICT_CONFIRMATION, actor=actor)
+            memory.conflicting_memory_id = existing.id
+            memory.conflict_reason = f"same key {key} has different value"
+            self.store.update_memory(memory.id, actor=actor, conflicting_memory_id=existing.id, conflict_reason=memory.conflict_reason)
+            conflict = self.store.add_conflict(MemoryConflict(user_id=user_id, existing_memory_id=existing.id, candidate_memory_id=memory.id,
+                conflict_type=conflict_type_for_key(key), existing_content=existing.content, candidate_content=memory.content))
+            self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=existing.id, relation_type=RelationType.CONTRADICTS))
+            return IngestionResult("conflict", memory=memory, existing_memory=existing, conflict=conflict, prompt=confirmation_prompt(existing, memory))
+        lifecycle = MemoryStatus.ACTIVE if candidate.confidence >= settings.memory_auto_approve_confidence and candidate.sensitivity == "low" and candidate.source == "user_message" else MemoryStatus.PENDING_REVIEW
+        memory = self.remember(user_id=user_id, content=content, memory_type=candidate.type, source_session=source_session,
+            tags={"agent", "extracted"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value},
+            confidence_score=candidate.confidence, sensitivity=candidate.sensitivity, status=lifecycle, actor=actor)
+        return IngestionResult("created", memory=memory)
 
-        Normal recall returns only approved active memories. Agent chat can opt in
-        to pending-review facts so it can transparently tell the user that a
-        matching memory exists but still needs approval instead of saying the
-        memory does not exist.
-        """
+    def pending_conflict_for_user(self, user_id: str) -> MemoryConflict | None:
+        return self.store.pending_conflict_for_user(user_id) if hasattr(self.store, "pending_conflict_for_user") else None
 
+    def resolve_pending_conflict(self, user_id: str, reply: str, *, actor: str = "user") -> IngestionResult | None:
+        conflict = self.pending_conflict_for_user(user_id)
+        if not conflict:
+            return None
+        decision = classify_conflict_reply(reply, self.conflict_detector)
+        existing = self.store.get_memory(conflict.existing_memory_id)
+        candidate = self.store.get_memory(conflict.candidate_memory_id)
+        if decision == "accept":
+            self.store.update_memory(existing.id, actor=actor, status=MemoryStatus.SUPERSEDED)
+            self.sync_memory_vector(existing)
+            candidate = self.store.update_memory(candidate.id, actor=actor, status=MemoryStatus.ACTIVE, approved_at=utc_now(), last_confirmed_at=utc_now())
+            self.sync_memory_vector(candidate)
+            self.store.resolve_conflict(conflict.id, resolution=MemoryConflictResolution.ACCEPTED_CANDIDATE.value, actor=actor)
+            return IngestionResult("accepted_candidate", memory=candidate, existing_memory=existing, conflict=conflict)
+        if decision == "reject":
+            candidate = self.store.update_memory(candidate.id, actor=actor, status=MemoryStatus.REJECTED)
+            self.sync_memory_vector(candidate)
+            self.store.resolve_conflict(conflict.id, resolution=MemoryConflictResolution.KEPT_EXISTING.value, actor=actor)
+            return IngestionResult("kept_existing", memory=candidate, existing_memory=existing, conflict=conflict)
+        self.store.update_memory(candidate.id, actor=actor, status=MemoryStatus.REJECTED)
+        self.sync_memory_vector(candidate)
+        self.store.resolve_conflict(conflict.id, resolution=MemoryConflictResolution.MERGED.value, actor=actor)
+        return IngestionResult("clarification_needed", memory=candidate, existing_memory=existing, conflict=conflict)
+
+    def recall(self, user_id: str, query: str, *, query_tags: Iterable[str] = (), limit: int | None = None, include_pending_review: bool = False) -> list[RecallResult]:
+        limit = limit or settings.memory_recall_top_k
         results: list[RecallResult] = []
         query_embedding = self._embed_text(query)
-        allowed_statuses = {MemoryStatus.ACTIVE}
-        if include_pending_review:
-            allowed_statuses.add(MemoryStatus.PENDING_REVIEW)
-        vector_candidates = self.store.vector_search(
-            user_id,
-            query_embedding,
-            limit=max(limit * 4, 20),
-            include_inactive=include_pending_review,
-        )
-        fallback_candidates = self.store.list_memories(user_id, include_inactive=include_pending_review)
-        candidate_by_id = {memory.id: memory for memory in fallback_candidates}
-        candidate_by_id.update({memory.id: memory for memory in vector_candidates})
-        candidate_memories = [memory for memory in candidate_by_id.values() if memory.status in allowed_statuses]
-        for memory in candidate_memories:
-            if memory.embedding is None:
-                memory.embedding = self._embed_text(memory.content)
-            score, signals = hybrid_retrieval_score(
-                query,
-                memory,
-                query_tags=query_tags,
-                query_embedding=query_embedding,
-            )
-            if score <= 0:
-                continue
-            memory.last_recalled_at = utc_now()
-            results.append(
-                RecallResult(
-                    memory=memory,
-                    score=score,
-                    explanation=RecallExplanation(
-                        source_session=memory.source_session,
-                        confidence_score=memory.confidence_score,
-                        timestamp=memory.updated_at,
-                        ranking_signals=signals,
-                        reasoning_path=self._reasoning_path(query, memory, signals),
-                    ),
-                )
-            )
-        return sorted(results, key=lambda item: item.score, reverse=True)[:limit] # most relevant memories at the top
+        allowed = {MemoryStatus.ACTIVE} | ({MemoryStatus.PENDING_REVIEW} if include_pending_review else set())
+        vector_candidates = self.store.vector_search(user_id, query_embedding, limit=settings.memory_recall_vector_top_k, include_inactive=include_pending_review)
+        fallback = self.store.list_memories(user_id, include_inactive=include_pending_review)[:settings.memory_recall_fallback_limit]
+        by_id = {m.id: m for m in fallback}; by_id.update({m.id: m for m in vector_candidates})
+        for memory in [m for m in by_id.values() if m.status in allowed]:
+            if memory.embedding is None: memory.embedding = self._embed_text(memory.content)
+            score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags, query_embedding=query_embedding)
+            if score <= 0: continue
+            self.store.update_memory(memory.id, actor="recall", last_recalled_at=utc_now())
+            results.append(RecallResult(memory=memory, score=score, explanation=RecallExplanation(memory.source_session, memory.confidence_score, memory.updated_at, signals, self._reasoning_path(query, memory, signals))))
+        return sorted(results, key=lambda item: item.score, reverse=True)[:limit]
 
     def forget(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
-        """Mark a memory as forgotten while retaining audit history."""
-
-        memory = self.store.get_memory(memory_id)
-        if memory.user_id != user_id:
-            raise ValueError("memory does not belong to user")
-        return self.store.update_memory(memory_id, actor=actor, status=MemoryStatus.FORGOTTEN)
-
+        memory = self._owned_memory(user_id, memory_id)
+        updated = self.store.update_memory(memory.id, actor=actor, status=MemoryStatus.FORGOTTEN)
+        self.sync_memory_vector(updated); return updated
     def approve(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
-        memory = self._owned_memory(user_id, memory_id)
-        return self.store.update_memory(memory.id, actor=actor, status=MemoryStatus.ACTIVE, approved_at=utc_now())
-
+        updated = self.store.update_memory(self._owned_memory(user_id, memory_id).id, actor=actor, status=MemoryStatus.ACTIVE, approved_at=utc_now(), last_confirmed_at=utc_now())
+        self.sync_memory_vector(updated); return updated
     def reject(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
-        memory = self._owned_memory(user_id, memory_id)
-        return self.store.update_memory(memory.id, actor=actor, status=MemoryStatus.REJECTED)
-
+        updated = self.store.update_memory(self._owned_memory(user_id, memory_id).id, actor=actor, status=MemoryStatus.REJECTED)
+        self.sync_memory_vector(updated); return updated
+    def archive(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
+        updated = self.store.update_memory(self._owned_memory(user_id, memory_id).id, actor=actor, status=MemoryStatus.ARCHIVED)
+        self.sync_memory_vector(updated); return updated
     def edit_and_approve(self, user_id: str, memory_id: str, *, content: str, actor: str = "user") -> Memory:
-        memory = self._owned_memory(user_id, memory_id)
-        return self.store.update_memory(memory.id, actor=actor, content=content, embedding=self._embed_text(content), status=MemoryStatus.ACTIVE, approved_at=utc_now())
+        updated = self.store.update_memory(self._owned_memory(user_id, memory_id).id, actor=actor, content=content, embedding=self._embed_text(content), status=MemoryStatus.ACTIVE, approved_at=utc_now(), last_confirmed_at=utc_now())
+        self.sync_memory_vector(updated); return updated
+    def inspect(self, user_id: str, *, include_inactive: bool = False) -> list[Memory]: return self.store.list_memories(user_id, include_inactive=include_inactive)
+    def maintenance(self, user_id: str) -> dict[str, int]:
+        memories = self.store.list_memories(user_id, include_inactive=True)
+        merged = self._merge_duplicates(memories)
+        promoted = 0
+        for memory in self.store.list_memories(user_id):
+            if memory.memory_type != MemoryType.SEMANTIC and memory.stability_score >= 0.7 and memory.confidence_score >= 0.75:
+                self.store.update_memory(memory.id, actor="profile-agent", memory_type=MemoryType.SEMANTIC)
+                promoted += 1
+        return {"merged": merged, "promoted": promoted, "decayed": 0, "archived": 0}
+
+    def sync_memory_vector(self, memory: Memory) -> None:
+        if memory.status == MemoryStatus.ACTIVE: self.upsert_active_memory_vector(memory)
+        else: self.delete_memory_vector(memory.id)
+    def upsert_active_memory_vector(self, memory: Memory) -> None:
+        if not self.vector_index: return
+        if memory.status != MemoryStatus.ACTIVE: self.delete_memory_vector(memory.id); return
+        self.vector_index.upsert_memory(memory)
+    def delete_memory_vector(self, memory_id: str) -> None:
+        if self.vector_index and hasattr(self.vector_index, "delete_memory"): self.vector_index.delete_memory(memory_id)
+    def reconcile_vectors(self) -> dict[str, list[str] | int]:
+        active = {m.id: m for uid in self.store.list_user_ids() for m in self.store.list_memories(uid)}
+        indexed = set(self.vector_index.list_memory_ids()) if self.vector_index and hasattr(self.vector_index, "list_memory_ids") else set()
+        missing = sorted(set(active) - indexed); stale = sorted(indexed - set(active))
+        for mid in stale: self.delete_memory_vector(mid)
+        for mid in missing: self.upsert_active_memory_vector(active[mid])
+        return {"missing_active_vectors": missing, "orphan_or_stale_vectors": stale, "fixed": len(missing)+len(stale)}
 
     def _owned_memory(self, user_id: str, memory_id: str) -> Memory:
-        memory = self.store.get_memory(memory_id)
-        if memory.user_id != user_id:
-            raise ValueError("memory does not belong to user")
-        return memory
-
-    def inspect(self, user_id: str, *, include_inactive: bool = False) -> list[Memory]:
-        """List a user's memories for transparency controls."""
-
-        return self.store.list_memories(user_id, include_inactive=include_inactive)
-
-    def maintenance(self, user_id: str) -> dict[str, int]:
-        """Run autonomous memory maintenance for one user."""
-
-        memories = self.store.list_memories(user_id, include_inactive=True)
-        merged = self._merge_duplicates([m for m in memories if m.status != MemoryStatus.FORGOTTEN])
-        promoted = self._promote_stable_facts(self.store.list_memories(user_id))
-        decayed = self._decay_low_stability(self.store.list_memories(user_id))
-        archived = self._archive_stale(self.store.list_memories(user_id))
-        return {"merged": merged, "promoted": promoted, "decayed": decayed, "archived": archived}
-
+        m = self.store.get_memory(memory_id)
+        if m.user_id != user_id: raise ValueError("memory does not belong to user")
+        return m
     def _embed_text(self, text: str) -> list[float]:
-        """Embed text through the configured Qwen/Alibaba embedding provider."""
-
-        if self.embedding_provider is None:
-            raise RuntimeError("A Qwen embedding provider is required; local embeddings are disabled")
-        try:
-            return self.embedding_provider.embed_text(text)
-        except Exception:
-            if self.require_live_embeddings:
-                raise
-            raise RuntimeError("Qwen embedding provider failed and local embeddings are disabled")
-
-
-    def _handle_duplicate(self, memory: Memory, *, actor: str) -> Memory | None:
-        candidates = self.store.vector_search(memory.user_id, memory.embedding or [], limit=5, include_inactive=True)
-        for candidate in candidates:
-            lexical_similarity = keyword_score(memory.content, candidate)
-            similarity = lexical_similarity
-            if memory.embedding and candidate.embedding:
-                from .scoring import cosine_similarity
-                similarity = max(similarity, cosine_similarity(memory.embedding, candidate.embedding))
-            if lexical_similarity > 0.90:
-                try:
-                    from .monitoring import memory_metrics as metrics
-                    metrics.duplicate_count.inc()
-                except Exception:
-                    pass
-                memory.status = MemoryStatus.ARCHIVED
-                memory.tags.add("duplicate")
-                memory.metadata["duplicate_of"] = candidate.id
-                memory.confidence_reasons.append("duplicate archived for audit and maintenance")
-                return None
-            if lexical_similarity > 0.75:
-                memory.status = MemoryStatus.PENDING_REVIEW
-                memory.tags.add("possible_duplicate")
-                memory.metadata["possible_duplicate_of"] = candidate.id
-                memory.confidence_reasons.append("possible duplicate requires review")
-                break
-        return None
-
-    def _mark_conflicts(self, memory: Memory, *, actor: str) -> None:
-        for candidate in self.store.vector_search(memory.user_id, memory.embedding or [], limit=5, include_inactive=True):
-            if candidate.status == MemoryStatus.FORGOTTEN or candidate.id == memory.id:
-                continue
-            conflict, reason = self._semantic_conflict(memory, candidate)
-            if conflict:
-                try:
-                    from .monitoring import memory_metrics as metrics
-                    metrics.conflict_count.inc()
-                except Exception:
-                    pass
-                self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=candidate.id, relation_type=RelationType.CONTRADICTS))
-                if memory.confidence_score >= candidate.confidence_score:
-                    self.store.update_memory(candidate.id, actor="conflict-resolver", status=MemoryStatus.DEPRECATED)
-                    self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=candidate.id, relation_type=RelationType.SUPERSEDES))
-                    return
-                memory.status = MemoryStatus.POSSIBLY_CONFLICTING
-                memory.conflicting_memory_id = candidate.id
-                memory.conflict_reason = reason
-                memory.confidence_reasons.append(f"conflict requires review: {reason}")
-                return
-
-    def _semantic_conflict(self, memory: Memory, candidate: Memory) -> tuple[bool, str]:
-        if self.conflict_detector is not None:
-            prompt = f"Are these memories semantically conflicting? Return JSON with conflict and reason.\nA: {memory.content}\nB: {candidate.content}"
-            try:
-                data = json.loads(self.conflict_detector.chat([{"role": "user", "content": prompt}], temperature=0))
-                return bool(data.get("conflict")), str(data.get("reason", "semantic conflict"))
-            except Exception:
-                pass
-        new_subject = _subject_key(memory.content)
-        if new_subject and new_subject == _subject_key(candidate.content) and keyword_score(memory.content, candidate) < 0.85:
-            return True, "same subject has a different asserted value"
-        return False, ""
-
-    def _resolve_conflicts(self, new_memory: Memory, existing: list[Memory]) -> None:
-        new_subject = _subject_key(new_memory.content)
-        if not new_subject:
-            return
-        for old_memory in existing:
-            if _subject_key(old_memory.content) != new_subject:
-                continue
-            if keyword_score(new_memory.content, old_memory) > 0.85:
-                continue
-
-            # relationships between memories
-            if new_memory.confidence_score >= old_memory.confidence_score and new_memory.metadata.get("source", "explicit_user") == "explicit_user":
-                self.store.update_memory(
-                    old_memory.id,
-                    actor="conflict-resolver",
-                    status=MemoryStatus.POSSIBLY_CONFLICTING,
-                )
-                self.store.add_edge(
-                    MemoryEdge(
-                        source_memory=new_memory.id,
-                        target_memory=old_memory.id,
-                        relation_type=RelationType.SUPERSEDES,
-                    )
-                )
-            self.store.add_edge(
-                MemoryEdge(
-                    source_memory=new_memory.id,
-                    target_memory=old_memory.id,
-                    relation_type=RelationType.CONTRADICTS,
-                )
-            )
-            if new_memory.metadata.get("source", "explicit_user") != "explicit_user":
-                self.store.update_memory(
-                    new_memory.id,
-                    actor="conflict-resolver",
-                    status=MemoryStatus.POSSIBLY_CONFLICTING,
-                    confidence_reasons=[*new_memory.confidence_reasons, "possible contradiction requires review"],
-                )
-
-    def _reasoning_path(
-        self,
-        query: str,
-        memory: Memory,
-        signals: dict[str, float],
-    ) -> list[str]:
-        path = [f"Matched query tokens: {sorted(tokenize(query) & tokenize(memory.content))}"]
-        strongest = sorted(signals.items(), key=lambda item: item[1], reverse=True)[:3]
-        path.append("Top ranking signals: " + ", ".join(f"{name}={value:.2f}" for name, value in strongest))
-        if memory.tags:
-            path.append("Memory tags: " + ", ".join(sorted(memory.tags)))
-        path.append(f"Source session: {memory.source_session}")
-        return path
-
+        if self.embedding_provider is None: return [0.0] * self.fallback_embedding_dimensions
+        return self.embedding_provider.embed_text(text)
+    def _reasoning_path(self, query: str, memory: Memory, signals: dict[str, float]) -> list[str]:
+        return [f"Matched query tokens: {sorted(tokenize(query) & tokenize(memory.content))}", "Top ranking signals: " + ", ".join(f"{k}={v:.2f}" for k,v in sorted(signals.items(), key=lambda i:i[1], reverse=True)[:3]), f"Source session: {memory.source_session}"]
     def _merge_duplicates(self, memories: list[Memory]) -> int:
-        merged = 0
-        by_signature: dict[tuple[str, ...], list[Memory]] = defaultdict(list)
-        for memory in memories:
-            by_signature[tuple(sorted(tokenize(memory.content)))].append(memory)
-        # This is a simple heuristic for finding duplicates based on token overlap. In production, this could be more sophisticated and involve ML models to identify paraphrased duplicates or related facts.
-        for duplicates in by_signature.values():
-            if len(duplicates) < 2:
-                continue
-            keeper = max(duplicates, key=lambda item: item.confidence_score + item.importance_score)
-            for duplicate in duplicates:
-                if duplicate.id == keeper.id:
-                    continue
-                self.store.update_memory(
-                    duplicate.id,
-                    actor="compaction-agent",
-                    status=MemoryStatus.ARCHIVED,
-                )
-                self.store.add_edge(
-                    MemoryEdge(
-                        source_memory=keeper.id,
-                        target_memory=duplicate.id,
-                        relation_type=RelationType.SUPERSEDES,
-                    )
-                )
-                merged += 1
+        merged=0; by_sig=defaultdict(list)
+        for m in memories: by_sig[(m.memory_type.value, m.metadata.get("key"), str(m.metadata.get("value", "")).lower() or tuple(sorted(tokenize(m.content))))].append(m)
+        for dups in by_sig.values():
+            if len(dups)<2: continue
+            keeper=max(dups,key=lambda m:m.confidence_score)
+            for dup in dups:
+                if dup.id!=keeper.id:
+                    self.store.update_memory(dup.id, actor="compaction-agent", status=MemoryStatus.ARCHIVED); self.sync_memory_vector(dup); merged+=1
         return merged
 
-    def _promote_stable_facts(self, memories: list[Memory]) -> int:
-        promoted = 0
-        for memory in memories:
-            if memory.memory_type == MemoryType.SEMANTIC:
-                continue
-            if memory.stability_score >= 0.7 and memory.confidence_score >= 0.75:
-                self.store.update_memory(
-                    memory.id,
-                    actor="profile-agent",
-                    memory_type=MemoryType.SEMANTIC,
-                    importance_score=clamp_score(memory.importance_score + 0.1),
-                )
-                promoted += 1
-        return promoted
 
-    def _decay_low_stability(self, memories: list[Memory]) -> int:
-        decayed = 0
-        for memory in memories:
-            if memory.stability_score < 0.4:
-                self.store.update_memory(
-                    memory.id,
-                    actor="maintenance-agent",
-                    confidence_score=clamp_score(memory.confidence_score - 0.05),
-                )
-                decayed += 1
-        return decayed
+def normalize_candidate(candidate: MemoryCandidate) -> tuple[str, str | None, str]:
+    key = candidate.key or infer_key(candidate.content)
+    value = str(candidate.value or infer_value(candidate.content, key) or "").strip()
+    content = candidate.content or (f"User's {key} is {value}." if key and value else candidate.content)
+    return content, key, value
 
-    def _archive_stale(self, memories: list[Memory]) -> int:
-        archived = 0
-        for memory in memories:
-            if memory.confidence_score <= 0.2 and memory.importance_score <= 0.3:
-                self.store.update_memory(
-                    memory.id,
-                    actor="maintenance-agent",
-                    status=MemoryStatus.ARCHIVED,
-                )
-                archived += 1
-        return archived
+def infer_key(content: str) -> str | None:
+    lower=content.lower()
+    if re.search(r"\bmy name is\b|user'?s name is", lower): return "profile.name"
+    if "email" in lower: return "profile.email"
+    if "company" in lower or "work at" in lower: return "profile.company"
+    if "language" in lower and ("prefer" in lower or "speaks" in lower): return "preference.language"
+    if "theme" in lower: return "preference.ui_theme"
+    return _subject_key(content)
 
+def infer_value(content: str, key: str | None) -> str | None:
+    if key == "profile.name":
+        m=re.search(r"(?:my name is|user'?s name is)\s+([A-Z][\w'-]*)", content, re.I); return m.group(1) if m else None
+    return None
+
+def values_equal(a: str, b: str) -> bool: return a.strip().casefold() == b.strip().casefold()
+def conflict_type_for_key(key: str | None) -> str:
+    if key and key.startswith("profile."): return "identity_conflict"
+    if key and key.startswith("preference."): return "preference_conflict"
+    return "fact_conflict"
+def confirmation_prompt(existing: Memory, candidate: Memory) -> str:
+    return f"I currently remember {friendly_memory(existing)}. Should I update it to {candidate.metadata.get('value') or candidate.content}?"
+def friendly_memory(memory: Memory) -> str:
+    if memory.metadata.get("key") == "profile.name" and memory.metadata.get("value"): return f"your name as {memory.metadata['value']}"
+    return memory.content
+
+def classify_conflict_reply(reply: str, detector: ConflictDetector | None = None) -> str:
+    text=reply.strip().lower()
+    if re.search(r"^(yes|yep|yeah|correct|update|sure)\b", text) or "update it" in text: return "accept"
+    if re.search(r"^(no|nope|keep|wrong|do not|don't)\b", text) or "keep" in text: return "reject"
+    if detector is not None:
+        try:
+            raw=detector.chat([{"role":"system","content":"Return JSON only: {\"decision\":\"accept|reject|merge\"}"},{"role":"user","content":reply}], model=settings.qwen_flash_model, temperature=0, max_tokens=settings.qwen_conflict_resolution_max_tokens)
+            return {"accept":"accept","reject":"reject"}.get(json.loads(raw).get("decision"), "merge")
+        except Exception: pass
+    return "merge"
 
 def _subject_key(content: str) -> str | None:
     tokens = TOKEN_RE.findall(content.lower())
-    if not tokens:
-        return None
-    subject_markers = {"uses", "prefers", "likes", "works", "runs"}
     for index, token in enumerate(tokens):
-        if token in subject_markers and index > 0:
-            return tokens[index - 1] + ":" + token
+        if token in {"uses", "prefers", "likes", "works", "runs"} and index > 0: return tokens[index - 1] + ":" + token
     return None

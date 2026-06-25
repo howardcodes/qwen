@@ -5,7 +5,7 @@ from __future__ import annotations
 from celery import Celery
 
 from memos_q.config import settings
-from memos_q.engine import MemoryOS
+from memos_q.engine import MemoryCandidate, MemoryOS
 from memos_q.integrations.factory import build_memory_store
 from memos_q.integrations.qwen_cloud import QwenCloudClient, QwenMessage
 from memos_q.models import MemoryStatus
@@ -76,6 +76,7 @@ def summarize_session(user_id: str, source_session: str, transcript: str) -> str
         ],
         model=settings.qwen_flash_model,
         temperature=0,
+        max_tokens=settings.qwen_summary_max_tokens,
     )
     _memory_os.remember(
         user_id=user_id,
@@ -110,12 +111,12 @@ def evolve_memories_from_chat(
     _memory_os.store.record_audit("job_start", "celery-memory-evolution", user_id, None, {"task_id": self.request.id})
     prompt = (
         "Extract durable memories from the user message, assistant response, and context. "
-        "Return only a JSON array of objects with content, type, confidence, sensitivity, reason. "
+        "Return only a JSON array of objects with content, type, key, value, confidence, sensitivity, source, should_remember, reason. "
         "Allowed types: preference, user_fact, project_context, task, workflow. "
         "Allowed sensitivity: low, medium, high.\n"
-        f"Context:\n{memory_context}\nUser Message:\n{user_message}\nAssistant Response:\n{assistant_response}"
+        f"Context:\n{memory_context[:settings.memory_extraction_max_input_chars]}\nUser Message:\n{user_message[:settings.memory_extraction_max_input_chars]}" + (f"\nAssistant Response:\n{assistant_response[:settings.memory_extraction_max_input_chars]}" if settings.memory_extraction_include_assistant_response else "")
     )
-    raw = _qwen.chat([QwenMessage("system", "Return strict JSON only."), QwenMessage("user", prompt)], temperature=0)
+    raw = _qwen.chat([QwenMessage("system", "Return strict JSON only."), QwenMessage("user", prompt)], model=settings.qwen_flash_model, temperature=0, max_tokens=settings.qwen_memory_extraction_max_tokens)
 
     import json
     data = json.loads(raw)
@@ -127,17 +128,14 @@ def evolve_memories_from_chat(
         if confidence < 0.60:
             skipped += 1
             continue
-        lifecycle_status = MemoryStatus.ACTIVE if confidence >= 0.90 and sensitivity == "low" else MemoryStatus.PENDING_REVIEW
-        _memory_os.remember(
+        _memory_os.ingest_candidate(
             user_id=user_id,
-            content=str(item["content"]),
-            memory_type=str(item["type"]),
+            candidate=MemoryCandidate(
+                content=str(item["content"]), type=str(item["type"]), key=item.get("key"), value=item.get("value"),
+                confidence=confidence, sensitivity=sensitivity, source=str(item.get("source", "user_message")),
+                should_remember=bool(item.get("should_remember", True)), reason=str(item.get("reason", "")),
+            ),
             source_session=source_session,
-            tags={"agent", "qwen", "extracted"},
-            metadata={"source": "agent_extraction", "reason": str(item.get("reason", ""))},
-            confidence_score=confidence,
-            sensitivity=sensitivity,
-            status=lifecycle_status,
             actor="celery-memory-evolution",
         )
         metrics.memories_created_total.inc()
