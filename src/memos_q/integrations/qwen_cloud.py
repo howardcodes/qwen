@@ -8,8 +8,9 @@ is installed in the runtime image.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+import json
 from typing import Any
 
 import requests
@@ -41,13 +42,45 @@ class QwenCloudClient:
     ) -> str:
         """Generate a response with Qwen3.5-Plus by default."""
 
-        payload = {
+        payload = self._chat_payload(messages, model=model, temperature=temperature)
+        data = self._post("/chat/completions", payload)
+        return data["choices"][0]["message"]["content"]
+
+    def chat_stream(
+        self,
+        messages: Sequence[QwenMessage | dict[str, Any]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.2,
+    ) -> Iterator[str]:
+        """Stream generated chat tokens from Qwen's OpenAI-compatible endpoint."""
+
+        payload = {**self._chat_payload(messages, model=model, temperature=temperature), "stream": True}
+        for event in self._post_stream("/chat/completions", payload):
+            if event == "[DONE]":
+                break
+            try:
+                data = json.loads(event)
+            except ValueError:
+                continue
+            for choice in data.get("choices", []):
+                delta = choice.get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield content
+
+    def _chat_payload(
+        self,
+        messages: Sequence[QwenMessage | dict[str, Any]],
+        *,
+        model: str | None,
+        temperature: float,
+    ) -> dict[str, Any]:
+        return {
             "model": model or self.config.qwen_reasoning_model,
             "messages": [serialize_message(message) for message in messages],
             "temperature": temperature,
         }
-        data = self._post("/chat/completions", payload)
-        return data["choices"][0]["message"]["content"]
 
     def embed_texts(
         self,
@@ -123,6 +156,17 @@ class QwenCloudClient:
         )
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self._request(path, payload, stream=False)
+        return response.json()
+
+    def _post_stream(self, path: str, payload: dict[str, Any]) -> Iterator[str]:
+        with self._request(path, payload, stream=True) as response:
+            for line in response.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                yield line.removeprefix("data:").strip()
+
+    def _request(self, path: str, payload: dict[str, Any], *, stream: bool) -> requests.Response:
         if not self.config.qwen_api_key:
             raise RuntimeError("QWEN_API_KEY is required for live QwenCloud calls")
         response = self.session.post(
@@ -133,9 +177,10 @@ class QwenCloudClient:
             },
             json=payload,
             timeout=60,
+            stream=stream,
         )
         response.raise_for_status()
-        return response.json()
+        return response
 
 
 def serialize_message(message: QwenMessage | dict[str, Any]) -> dict[str, Any]:

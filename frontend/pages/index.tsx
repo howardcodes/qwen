@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import ReactFlow, { Background, Controls, Edge, Node } from 'reactflow'
 import { Button } from '../components/ui/button'
 import { Card } from '../components/ui/card'
-import { getIntegrationStatus, IntegrationStatus, sendAgentMessage } from '../lib/api'
+import { getIntegrationStatus, IntegrationStatus, streamAgentMessage } from '../lib/api'
 
 const nodes: Node[] = [
   { id: 'user', position: { x: 0, y: 90 }, data: { label: 'User Input' }, type: 'input' },
@@ -50,8 +50,10 @@ export default function Home() {
     setLoading(true)
     setError('')
     try {
-      const result = await sendAgentMessage(userId, message)
-      setResponse(result.response)
+      setResponse('')
+      await streamAgentMessage(userId, message, (token) => {
+        setResponse((current) => current + token)
+      })
     } catch (err) {
       setError(String(err))
     } finally {
@@ -106,7 +108,7 @@ export default function Home() {
             onChange={(event) => setMessage(event.target.value)}
           />
           <Button className="mt-4" disabled={loading} onClick={submit}>
-            {loading ? 'Calling QwenCloud...' : 'Send to MemOS-Q'}
+            {loading ? 'Streaming from QwenCloud...' : 'Send to MemOS-Q'}
           </Button>
           {response && <p className="mt-4 rounded-xl bg-emerald-400/10 p-4 text-emerald-100">{response}</p>}
           {error && <p className="mt-4 rounded-xl bg-red-400/10 p-4 text-red-100">{error}</p>}
