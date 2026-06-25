@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactFlow, { Background, Controls, Edge, Node } from 'reactflow'
 import { Button } from '../components/ui/button'
 import { Card } from '../components/ui/card'
@@ -28,9 +28,11 @@ export default function Home() {
   const [response, setResponse] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const activeStream = useRef<AbortController | null>(null)
 
   useEffect(() => {
     getIntegrationStatus().then(setStatus).catch((err) => setError(String(err)))
+    return () => activeStream.current?.abort()
   }, [])
 
   const statusItems = useMemo(() => {
@@ -47,38 +49,56 @@ export default function Home() {
   }, [status])
 
   const submit = useCallback(async () => {
+    activeStream.current?.abort()
+    const controller = new AbortController()
+    activeStream.current = controller
     setLoading(true)
     setError('')
     try {
       setResponse('')
-      await streamAgentMessage(userId, message, (token) => {
-        setResponse((current) => current + token)
-      })
+      await streamAgentMessage(
+        userId,
+        message,
+        (token) => {
+          setResponse((current) => current + token)
+        },
+        { signal: controller.signal }
+      )
     } catch (err) {
-      setError(String(err))
+      if (!controller.signal.aborted) {
+        setError(String(err))
+      }
     } finally {
-      setLoading(false)
+      if (activeStream.current === controller) {
+        activeStream.current = null
+        setLoading(false)
+      }
     }
   }, [message, userId])
+
+  const stopStreaming = useCallback(() => {
+    activeStream.current?.abort()
+    activeStream.current = null
+    setLoading(false)
+  }, [])
 
   return (
     <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-8 px-6 py-8">
       <section className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
         <div>
-          <p className="mb-3 text-sm font-semibold uppercase tracking-[0.3em] text-accent">MemOS-Q Live Stack</p>
-          <h1 className="text-5xl font-black leading-tight">Self-evolving memory OS powered by QwenCloud integrations.</h1>
-          <p className="mt-5 max-w-2xl text-lg text-slate-300">
-            This dashboard connects Next.js 12, Tailwind CSS, shadcn-style UI primitives, React Flow, FastAPI,
-            Qwen/DashScope, Pinecone vector recall, ECS-hosted Postgres/Redis/MinIO, Celery maintenance, and observability endpoints.
+          <p className="mb-3 text-sm font-semibold uppercase tracking-[0.3em] text-blue-600">MemOS-Q Live Stack</p>
+          <h1 className="text-5xl font-black leading-tight tracking-tight text-slate-950">Production memory controls for QwenCloud agents.</h1>
+          <p className="mt-5 max-w-2xl text-lg text-slate-600">
+            Review memory health, verify infrastructure, and test grounded agent responses backed by Qwen/DashScope, Pinecone recall, durable storage, background maintenance, and observability.
           </p>
         </div>
         <Card>
           <h2 className="mb-4 text-xl font-bold">Integration status</h2>
           <div className="grid gap-3">
             {statusItems.map(([label, ok]) => (
-              <div key={String(label)} className="flex items-center justify-between rounded-xl bg-white/5 px-4 py-3">
+              <div key={String(label)} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                 <span>{label}</span>
-                <span className={ok ? 'text-emerald-300' : 'text-amber-300'}>{ok ? 'configured' : 'needs key'}</span>
+                <span className={ok ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{ok ? 'configured' : 'needs key'}</span>
               </div>
             ))}
           </div>
@@ -94,24 +114,31 @@ export default function Home() {
           </ReactFlow>
         </Card>
         <Card>
-          <h2 className="mb-3 text-xl font-bold">Live Qwen-Agent chat</h2>
-          <label className="mb-2 block text-sm font-semibold text-slate-300">Authenticated user ID</label>
+          <h2 className="mb-3 text-xl font-bold">Grounded agent test</h2>
+          <label className="mb-2 block text-sm font-semibold text-slate-600">Authenticated user ID</label>
           <input
-            className="mb-4 w-full rounded-xl border border-white/10 bg-black/30 p-3 outline-none focus:border-accent"
+            className="mb-4 w-full rounded-xl border border-slate-200 bg-white p-3 outline-none focus:border-accent"
             value={userId}
             onChange={(event) => setUserId(event.target.value)}
           />
-          <label className="mb-2 block text-sm font-semibold text-slate-300">Message</label>
+          <label className="mb-2 block text-sm font-semibold text-slate-600">Message</label>
           <textarea
-            className="min-h-32 w-full rounded-xl border border-white/10 bg-black/30 p-4 outline-none focus:border-accent"
+            className="min-h-32 w-full rounded-xl border border-slate-200 bg-white p-4 outline-none focus:border-accent"
             value={message}
             onChange={(event) => setMessage(event.target.value)}
           />
-          <Button className="mt-4" disabled={loading} onClick={submit}>
-            {loading ? 'Streaming from QwenCloud...' : 'Send to MemOS-Q'}
-          </Button>
-          {response && <p className="mt-4 rounded-xl bg-emerald-400/10 p-4 text-emerald-100">{response}</p>}
-          {error && <p className="mt-4 rounded-xl bg-red-400/10 p-4 text-red-100">{error}</p>}
+          <div className="mt-4 flex flex-wrap gap-3">
+            <Button disabled={loading || !message.trim()} onClick={submit}>
+              {loading ? 'Streaming from QwenCloud...' : 'Send to MemOS-Q'}
+            </Button>
+            {loading && (
+              <Button className="bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50" onClick={stopStreaming}>
+                Stop stream
+              </Button>
+            )}
+          </div>
+          {response && <p className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">{response}</p>}
+          {error && <p className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-red-900">{error}</p>}
         </Card>
       </section>
     </main>

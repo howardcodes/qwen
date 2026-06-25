@@ -121,13 +121,31 @@ class MemoryOS:
         *,
         query_tags: Iterable[str] = (),
         limit: int = 5,
+        include_pending_review: bool = False,
     ) -> list[RecallResult]:
-        """Return ranked memories with explainable recall metadata."""
+        """Return ranked memories with explainable recall metadata.
+
+        Normal recall returns only approved active memories. Agent chat can opt in
+        to pending-review facts so it can transparently tell the user that a
+        matching memory exists but still needs approval instead of saying the
+        memory does not exist.
+        """
 
         results: list[RecallResult] = []
         query_embedding = self._embed_text(query)
-        vector_candidates = self.store.vector_search(user_id, query_embedding, limit=max(limit * 4, 20))
-        candidate_memories = [m for m in (vector_candidates or self.store.list_memories(user_id)) if m.status == MemoryStatus.ACTIVE]
+        allowed_statuses = {MemoryStatus.ACTIVE}
+        if include_pending_review:
+            allowed_statuses.add(MemoryStatus.PENDING_REVIEW)
+        vector_candidates = self.store.vector_search(
+            user_id,
+            query_embedding,
+            limit=max(limit * 4, 20),
+            include_inactive=include_pending_review,
+        )
+        fallback_candidates = self.store.list_memories(user_id, include_inactive=include_pending_review)
+        candidate_by_id = {memory.id: memory for memory in fallback_candidates}
+        candidate_by_id.update({memory.id: memory for memory in vector_candidates})
+        candidate_memories = [memory for memory in candidate_by_id.values() if memory.status in allowed_statuses]
         for memory in candidate_memories:
             if memory.embedding is None:
                 memory.embedding = self._embed_text(memory.content)
@@ -212,23 +230,23 @@ class MemoryOS:
     def _handle_duplicate(self, memory: Memory, *, actor: str) -> Memory | None:
         candidates = self.store.vector_search(memory.user_id, memory.embedding or [], limit=5, include_inactive=True)
         for candidate in candidates:
-            similarity = keyword_score(memory.content, candidate)
+            lexical_similarity = keyword_score(memory.content, candidate)
+            similarity = lexical_similarity
             if memory.embedding and candidate.embedding:
                 from .scoring import cosine_similarity
                 similarity = max(similarity, cosine_similarity(memory.embedding, candidate.embedding))
-            if similarity > 0.90:
+            if lexical_similarity > 0.90:
                 try:
                     from .monitoring import memory_metrics as metrics
                     metrics.duplicate_count.inc()
                 except Exception:
                     pass
-                return self.store.update_memory(
-                    candidate.id,
-                    actor="duplicate-detector",
-                    confidence_score=clamp_score(candidate.confidence_score + 0.03),
-                    last_seen_at=utc_now(),
-                )
-            if similarity > 0.75:
+                memory.status = MemoryStatus.ARCHIVED
+                memory.tags.add("duplicate")
+                memory.metadata["duplicate_of"] = candidate.id
+                memory.confidence_reasons.append("duplicate archived for audit and maintenance")
+                return None
+            if lexical_similarity > 0.75:
                 memory.status = MemoryStatus.PENDING_REVIEW
                 memory.tags.add("possible_duplicate")
                 memory.metadata["possible_duplicate_of"] = candidate.id
@@ -247,11 +265,15 @@ class MemoryOS:
                     metrics.conflict_count.inc()
                 except Exception:
                     pass
+                self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=candidate.id, relation_type=RelationType.CONTRADICTS))
+                if memory.confidence_score >= candidate.confidence_score:
+                    self.store.update_memory(candidate.id, actor="conflict-resolver", status=MemoryStatus.DEPRECATED)
+                    self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=candidate.id, relation_type=RelationType.SUPERSEDES))
+                    return
                 memory.status = MemoryStatus.POSSIBLY_CONFLICTING
                 memory.conflicting_memory_id = candidate.id
                 memory.conflict_reason = reason
                 memory.confidence_reasons.append(f"conflict requires review: {reason}")
-                self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=candidate.id, relation_type=RelationType.CONTRADICTS))
                 return
 
     def _semantic_conflict(self, memory: Memory, candidate: Memory) -> tuple[bool, str]:
@@ -336,7 +358,7 @@ class MemoryOS:
                 self.store.update_memory(
                     duplicate.id,
                     actor="compaction-agent",
-                    status=MemoryStatus.REJECTED,
+                    status=MemoryStatus.ARCHIVED,
                 )
                 self.store.add_edge(
                     MemoryEdge(
@@ -382,7 +404,7 @@ class MemoryOS:
                 self.store.update_memory(
                     memory.id,
                     actor="maintenance-agent",
-                    status=MemoryStatus.REJECTED,
+                    status=MemoryStatus.ARCHIVED,
                 )
                 archived += 1
         return archived

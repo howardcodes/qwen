@@ -1,5 +1,6 @@
 from memos_q import MemoryOS
 from memos_q.models import MemoryStatus, MemoryType, RelationType
+from memos_q.store import InMemoryStore
 
 
 class RecordingEmbeddingProvider:
@@ -118,3 +119,17 @@ def test_memory_os_uses_embedding_provider_for_remember_and_recall():
     assert results[0].memory.content == "User prefers Python."
     assert "vector" in results[0].explanation.ranking_signals
     assert "Python" in provider.texts
+
+
+def test_pending_review_recall_uses_record_fallback_when_vector_index_misses():
+    class MissingPendingVectorStore(InMemoryStore):
+        def vector_search(self, user_id, query_embedding, *, limit=20, include_inactive=False):
+            return [memory for memory in super().vector_search(user_id, query_embedding, limit=limit, include_inactive=include_inactive) if memory.status == MemoryStatus.ACTIVE]
+
+    memory_os = MemoryOS(store=MissingPendingVectorStore(), embedding_provider=RecordingEmbeddingProvider(), fallback_embedding_dimensions=2)
+    memory_os.remember(user_id="user-1", content="User's name is Mark", source_session="session-name", status=MemoryStatus.PENDING_REVIEW)
+    memory_os.remember(user_id="user-1", content="User likes to play badminton", source_session="session-sport")
+
+    contents = [result.memory.content for result in memory_os.recall("user-1", "What is my name?", include_pending_review=True)]
+
+    assert "User's name is Mark" in contents
