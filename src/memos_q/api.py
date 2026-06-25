@@ -12,7 +12,7 @@ import requests
 from fastapi import Depends, FastAPI, Header, Request, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import settings
@@ -147,43 +147,32 @@ async def recall(request: RecallRequest, user_id: str = Depends(authenticated_us
 
 
 @app.post("/agent/chat")
-async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authenticated_user)) -> StreamingResponse:
     recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=3)
     memory_context = format_memory_context(recalled)
-    response = await run_in_threadpool(
-        qwen_client.chat,
-        [
-            QwenMessage("system", "Use only relevant private memories. Ask before saving sensitive or uncertain facts."),
-            QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
-        ],
-        model=settings.qwen_reasoning_model,
-    )
-    start = time.perf_counter()
-    durable_facts = extract_durable_memories(request.message, response, memory_context)
-    metrics.memory_extraction_latency_seconds.observe(time.perf_counter() - start)
-    saved = []
-    for fact in durable_facts:
-        lifecycle_status = status_for_extracted_memory(fact)
-        if lifecycle_status is None:
-            continue
-        saved.append(
-            await run_in_threadpool(
-                memory_os.remember,
-                user_id=user_id,
-                content=fact.content,
-                memory_type=fact.type,
-                source_session=request.source_session,
-                tags={"agent", "qwen", "extracted"},
-                metadata={"source": "agent_extraction", "reason": fact.reason},
-                confidence_score=fact.confidence,
-                sensitivity=fact.sensitivity,
-                status=lifecycle_status,
-                actor="qwen-agent",
-            )
-        )
-        metrics.memories_created_total.inc()
-    refresh_memory_gauges(user_id)
-    return {"response": response, "recalled_memories": [serialize_memory(item.memory) for item in recalled], "pending_memories": [serialize_memory(item) for item in saved]}
+    messages = [
+        QwenMessage("system", "Use only relevant private memories. Ask before saving sensitive or uncertain facts."),
+        QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
+    ]
+
+    def token_stream():
+        response_parts: list[str] = []
+        try:
+            for token in qwen_client.chat_stream(messages, model=settings.qwen_reasoning_model):
+                response_parts.append(token)
+                yield token
+        finally:
+            assistant_response = "".join(response_parts)
+            if assistant_response:
+                enqueue_memory_evolution(
+                    user_id=user_id,
+                    source_session=request.source_session,
+                    user_message=request.message,
+                    assistant_response=assistant_response,
+                    memory_context=memory_context,
+                )
+
+    return StreamingResponse(token_stream(), media_type="text/plain; charset=utf-8")
 
 
 @app.post("/agent/qwen-agent")
@@ -326,6 +315,24 @@ def status_for_extracted_memory(memory: ExtractedMemory) -> MemoryStatus | None:
     if memory.confidence >= 0.90 and memory.sensitivity == "low":
         return MemoryStatus.ACTIVE
     return MemoryStatus.PENDING_REVIEW
+
+
+def enqueue_memory_evolution(*, user_id: str, source_session: str, user_message: str, assistant_response: str, memory_context: str) -> None:
+    start = time.perf_counter()
+    try:
+        from .workers.celery_app import evolve_memories_from_chat
+
+        evolve_memories_from_chat.delay(
+            user_id=user_id,
+            source_session=source_session,
+            user_message=user_message,
+            assistant_response=assistant_response,
+            memory_context=memory_context,
+        )
+    except Exception:
+        metrics.qwen_errors_total.inc()
+    finally:
+        metrics.memory_extraction_latency_seconds.observe(time.perf_counter() - start)
 
 
 def extract_durable_memories(user_message: str, assistant_response: str, conversation_context: str) -> list[ExtractedMemory]:

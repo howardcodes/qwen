@@ -26,7 +26,7 @@ export async function getIntegrationStatus(): Promise<IntegrationStatus> {
   return response.json()
 }
 
-export async function sendAgentMessage(userId: string, message: string) {
+export async function streamAgentMessage(userId: string, message: string, onToken: (token: string) => void): Promise<string> {
   const response = await fetch(`${API_BASE_URL}/agent/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
@@ -35,7 +35,27 @@ export async function sendAgentMessage(userId: string, message: string) {
   if (!response.ok) {
     throw new Error(await response.text())
   }
-  return response.json()
+  if (!response.body) {
+    throw new Error('Agent response did not include a readable stream')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let fullResponse = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    const token = decoder.decode(value, { stream: true })
+    fullResponse += token
+    onToken(token)
+  }
+
+  const remaining = decoder.decode()
+  if (remaining) {
+    fullResponse += remaining
+    onToken(remaining)
+  }
+  return fullResponse
 }
 
 export type MemoryRecord = {
