@@ -71,6 +71,29 @@ def should_index_memory(memory: Memory) -> bool:
     return memory.status == MemoryStatus.ACTIVE and (memory.importance_score >= 0.4 or memory.memory_type in INDEXABLE_MEMORY_TYPES or memory.metadata.get("stream_kind") in {"profile", "fact", "preference", "reflection"})
 
 
+def memory_from_stream_entry(entry: MemoryStreamEntry) -> Memory:
+    """Represent a memory-stream observation as an ephemeral recallable memory."""
+
+    return Memory(
+        id=entry.id,
+        user_id=entry.user_id,
+        content=entry.content,
+        memory_type=MemoryType.EPISODIC,
+        source_session=str(entry.metadata.get("source_session", "memory-stream")),
+        confidence_score=0.70,
+        importance_score=entry.importance_score / 10,
+        novelty_score=0.5,
+        stability_score=0.35,
+        sensitivity=str(entry.metadata.get("sensitivity", "low")),
+        tags={"memory-stream", entry.kind.value},
+        metadata={**entry.metadata, "stream_entry_id": entry.id, "stream_kind": entry.kind.value},
+        status=entry.status,
+        created_at=entry.created_at,
+        updated_at=entry.last_accessed_at,
+        last_recalled_at=entry.last_accessed_at,
+    )
+
+
 class ConflictDetector(Protocol):
     def chat(self, messages: Sequence[object], *, model: str | None = None, temperature: float = 0.2, max_tokens: int | None = None) -> str: ...
 
@@ -198,6 +221,19 @@ class MemoryOS:
             if score <= 0: continue
             self.store.update_memory(memory.id, actor="recall", last_recalled_at=utc_now())
             results.append(RecallResult(memory=memory, score=score, explanation=RecallExplanation(memory.source_session, memory.confidence_score, memory.updated_at, signals, self._reasoning_path(query, memory, signals))))
+        if hasattr(self.store, "list_memory_stream"):
+            accessed_stream_ids: list[str] = []
+            for entry in self.store.list_memory_stream(user_id, include_inactive=include_pending_review)[-settings.memory_recall_fallback_limit:]:
+                if entry.status not in allowed:
+                    continue
+                memory = memory_from_stream_entry(entry)
+                score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags, query_embedding=query_embedding)
+                if score <= 0:
+                    continue
+                accessed_stream_ids.append(entry.id)
+                results.append(RecallResult(memory=memory, score=score, explanation=RecallExplanation(memory.source_session, memory.confidence_score, memory.updated_at, signals, self._reasoning_path(query, memory, signals))))
+            if accessed_stream_ids and hasattr(self.store, "update_memory_stream_access"):
+                self.store.update_memory_stream_access(accessed_stream_ids, actor="recall")
         return sorted(results, key=lambda item: item.score, reverse=True)[:limit]
 
     def forget(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:

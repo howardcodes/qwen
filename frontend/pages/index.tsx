@@ -11,7 +11,7 @@ const starterConversations = ['Memory chat', 'Study help', 'Preferences']
 
 export default function Home() {
   const [userId, setUserId] = useState('demo-user')
-  const [message, setMessage] = useState('Hi, my name is Mark and I like badminton.')
+  const [message, setMessage] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'assistant', content: 'Hi — I can answer with memory-aware context while keeping the interface focused on chat.' }
   ])
