@@ -16,10 +16,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import settings
-from .engine import MemoryCandidate, MemoryOS
+from .engine import MemoryOS
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
-from .models import MemoryStatus, MemoryType
+from .models import MemoryStatus, MemoryStreamEntry, MemoryStreamKind, MemoryType
 from .monitoring import memory_metrics as metrics
 from .monitoring.observability import add_prometheus_metrics, configure_opentelemetry
 
@@ -181,6 +181,7 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
         finally:
             assistant_response = "".join(response_parts)
             log_timing(request_id, "qwen_complete", (time.perf_counter() - start_request) * 1000, model=settings.qwen_chat_default_model, output_tokens=len(assistant_response.split()))
+            append_chat_observations(user_id, request.source_session, request.message)
             if assistant_response:
                 enqueue_memory_evolution(user_id=user_id, source_session=request.source_session, user_message=request.message, assistant_response=assistant_response, memory_context=memory_context)
             log_timing(request_id, "request_complete", 0)
@@ -343,6 +344,39 @@ def status_for_extracted_memory(memory: ExtractedMemory) -> MemoryStatus | None:
     if memory.confidence >= 0.90 and memory.sensitivity == "low":
         return MemoryStatus.ACTIVE
     return MemoryStatus.PENDING_REVIEW
+
+
+def append_chat_observations(user_id: str, source_session: str, message: str) -> None:
+    """Append the raw user turn to the memory stream without example-specific extraction."""
+
+    if not hasattr(memory_os.store, "add_memory_stream_entry"):
+        return
+    memory_os.store.add_memory_stream_entry(
+        MemoryStreamEntry(
+            user_id=user_id,
+            content=f"User said: {message.strip()}",
+            kind=MemoryStreamKind.OBSERVATION,
+            importance_score=estimate_observation_importance(message),
+            metadata={"source_session": source_session, "source": "chat_observation"},
+        ),
+        actor="chat-observer",
+    )
+
+
+def estimate_observation_importance(message: str) -> int:
+    """Generic importance heuristic for stream-only chat observations."""
+
+    text = message.strip()
+    lower = text.lower()
+    score = 2
+    durable_markers = ("my ", "i am ", "i'm ", "i like ", "i love ", "i prefer ", "remember ")
+    if any(marker in lower for marker in durable_markers):
+        score += 2
+    if len(text.split()) >= 8:
+        score += 1
+    if "?" in text:
+        score = max(1, score - 1)
+    return max(1, min(10, score))
 
 
 def enqueue_memory_evolution(*, user_id: str, source_session: str, user_message: str, assistant_response: str, memory_context: str) -> None:
