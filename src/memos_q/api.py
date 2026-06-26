@@ -159,6 +159,8 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
         text = "Got it — I updated your memory." if pending_resolution.action == "accepted_candidate" else "Got it — I kept the existing memory."
         return StreamingResponse(iter([text]), media_type="text/plain; charset=utf-8")
 
+    append_chat_observations(user_id, request.source_session, request.message)
+
     start = time.perf_counter()
     recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False)
     log_timing(request_id, "memory_recall", (time.perf_counter() - start) * 1000)
