@@ -78,9 +78,11 @@ def hybrid_retrieval_score(
     query_tags: Iterable[str] = (),
     query_embedding: list[float] | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Compute weighted vector/keyword retrieval score and individual signals."""
+    """Compute Stanford-style relevance + importance + recency retrieval score."""
 
+    relevance = max(cosine_similarity(query_embedding, memory.embedding), semantic_score(query, memory, query_embedding=query_embedding), keyword_score(query, memory))
     signals = {
+        "relevance": relevance,
         "vector": cosine_similarity(query_embedding, memory.embedding),
         "semantic": semantic_score(query, memory, query_embedding=query_embedding),
         "keyword": keyword_score(query, memory),
@@ -89,16 +91,10 @@ def hybrid_retrieval_score(
         "confidence": memory.confidence_score,
         "graph": graph_proximity_score(memory, query_tags),
     }
-    type_boost = 0.05 if memory.memory_type.value in {"preference", "workflow"} else 0.0
-    approval_boost = 0.05 if memory.approved_at is not None and recency_score(memory.approved_at) > 0.75 else 0.0
-    signals["type_boost"] = type_boost
-    signals["approval_boost"] = approval_boost
     score = (
-        0.60 * signals["vector"]
-        + 0.20 * signals["recency"]
-        + 0.20 * signals["confidence"]
-        + type_boost
-        + approval_boost
+        0.45 * signals["relevance"]
+        + 0.30 * signals["importance"]
+        + 0.25 * signals["recency"]
     )
     return clamp_score(score), signals
 
