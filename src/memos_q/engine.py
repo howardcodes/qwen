@@ -11,7 +11,7 @@ from typing import Protocol
 
 from .config import settings
 from .models import (
-    Memory, MemoryConflict, MemoryConflictResolution, MemoryEdge, MemoryStatus,
+    Memory, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictResolution, MemoryEdge, MemoryStatus,
     MemoryType, RecallExplanation, RecallResult, RelationType, clamp_score, utc_now,
 )
 from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, quality_scores, tokenize
@@ -19,6 +19,7 @@ from .store import InMemoryStore
 
 
 ACTIVE_ONLY_VECTOR_STATUSES = {MemoryStatus.ACTIVE}
+INDEXABLE_MEMORY_TYPES = {MemoryType.USER_FACT, MemoryType.PREFERENCE, MemoryType.SEMANTIC, MemoryType.CONVERSATION_SUMMARY}
 
 
 @dataclass(slots=True)
@@ -41,6 +42,33 @@ class IngestionResult:
     existing_memory: Memory | None = None
     conflict: MemoryConflict | None = None
     prompt: str | None = None
+
+
+def memory_kind_for_type(memory_type: MemoryType | str) -> MemoryStreamKind:
+    kind_map = {
+        MemoryType.USER_FACT: MemoryStreamKind.FACT,
+        MemoryType.PREFERENCE: MemoryStreamKind.PREFERENCE,
+        MemoryType.SEMANTIC: MemoryStreamKind.FACT,
+        MemoryType.CONVERSATION_SUMMARY: MemoryStreamKind.REFLECTION,
+    }
+    return kind_map.get(MemoryType(memory_type), MemoryStreamKind.OBSERVATION)
+
+def stream_importance_1_to_10(content: str, memory_type: MemoryType | str = MemoryType.EPISODIC, confidence: float = 0.75) -> int:
+    tokens = tokenize(content)
+    score = 2
+    lower = content.lower()
+    if MemoryType(memory_type) in {MemoryType.USER_FACT, MemoryType.PREFERENCE, MemoryType.SEMANTIC, MemoryType.CONVERSATION_SUMMARY}:
+        score += 3
+    if any(marker in lower for marker in ["my name is", "likes", "prefer", "exam", "student", "asked about"]):
+        score += 2
+    if len(tokens) >= 6:
+        score += 1
+    if confidence >= 0.85:
+        score += 1
+    return max(1, min(10, score))
+
+def should_index_memory(memory: Memory) -> bool:
+    return memory.status == MemoryStatus.ACTIVE and (memory.importance_score >= 0.4 or memory.memory_type in INDEXABLE_MEMORY_TYPES or memory.metadata.get("stream_kind") in {"profile", "fact", "preference", "reflection"})
 
 
 class ConflictDetector(Protocol):
@@ -76,15 +104,18 @@ class MemoryOS:
                  confidence_reasons: list[str] | None = None, status: MemoryStatus = MemoryStatus.ACTIVE,
                  sensitivity: str = "low", actor: str = "memory-agent") -> Memory:
         scores = quality_scores(content, self.store.list_memories(user_id))
+        stream_importance = stream_importance_1_to_10(content, memory_type, confidence_score if confidence_score is not None else float(scores["confidence"]))
         memory = Memory(user_id=user_id, content=content, memory_type=memory_type, source_session=source_session,
             confidence_score=confidence_score if confidence_score is not None else float(scores["confidence"]),
-            importance_score=importance_score if importance_score is not None else float(scores["importance"]),
+            importance_score=importance_score if importance_score is not None else stream_importance / 10,
             novelty_score=novelty_score if novelty_score is not None else float(scores["novelty"]),
             stability_score=stability_score if stability_score is not None else float(scores["stability"]),
-            tags=set(tags), metadata=dict(metadata or {}), confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
+            tags=set(tags), metadata={**dict(metadata or {}), "stream_kind": memory_kind_for_type(memory_type).value, "stream_importance": stream_importance}, confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
             embedding=self._embed_text(content), status=status, sensitivity=sensitivity,
             approved_at=utc_now() if status == MemoryStatus.ACTIVE else None, last_confirmed_at=utc_now() if status == MemoryStatus.ACTIVE else None,
             last_seen_at=utc_now())
+        if hasattr(self.store, "add_memory_stream_entry"):
+            self.store.add_memory_stream_entry(MemoryStreamEntry(user_id=user_id, content=content, kind=memory_kind_for_type(memory_type), importance_score=stream_importance, metadata={"source_session": source_session, "memory_id": memory.id}), actor=actor)
         self.store.add_memory(memory, actor=actor)
         # Legacy semantic conflict handling for direct remember() calls. Structured ingestion uses confirmation instead.
         for old in self.store.list_memories(user_id):
@@ -120,7 +151,7 @@ class MemoryOS:
                 conflict_type=conflict_type_for_key(key), existing_content=existing.content, candidate_content=memory.content))
             self.store.add_edge(MemoryEdge(source_memory=memory.id, target_memory=existing.id, relation_type=RelationType.CONTRADICTS))
             return IngestionResult("conflict", memory=memory, existing_memory=existing, conflict=conflict, prompt=confirmation_prompt(existing, memory))
-        lifecycle = MemoryStatus.ACTIVE if candidate.confidence >= settings.memory_auto_approve_confidence and candidate.sensitivity == "low" and candidate.source == "user_message" else MemoryStatus.PENDING_REVIEW
+        lifecycle = policy_status_for_candidate(candidate, key)
         memory = self.remember(user_id=user_id, content=content, memory_type=candidate.type, source_session=source_session,
             tags={"agent", "extracted"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value},
             confidence_score=candidate.confidence, sensitivity=candidate.sensitivity, status=lifecycle, actor=actor)
@@ -197,11 +228,11 @@ class MemoryOS:
         return {"merged": merged, "promoted": promoted, "decayed": 0, "archived": 0}
 
     def sync_memory_vector(self, memory: Memory) -> None:
-        if memory.status == MemoryStatus.ACTIVE: self.upsert_active_memory_vector(memory)
+        if should_index_memory(memory): self.upsert_active_memory_vector(memory)
         else: self.delete_memory_vector(memory.id)
     def upsert_active_memory_vector(self, memory: Memory) -> None:
         if not self.vector_index: return
-        if memory.status != MemoryStatus.ACTIVE: self.delete_memory_vector(memory.id); return
+        if not should_index_memory(memory): self.delete_memory_vector(memory.id); return
         self.vector_index.upsert_memory(memory)
     def delete_memory_vector(self, memory_id: str) -> None:
         if self.vector_index and hasattr(self.vector_index, "delete_memory"): self.vector_index.delete_memory(memory_id)
@@ -281,3 +312,15 @@ def _subject_key(content: str) -> str | None:
     for index, token in enumerate(tokens):
         if token in {"uses", "prefers", "likes", "works", "runs"} and index > 0: return tokens[index - 1] + ":" + token
     return None
+
+
+def policy_status_for_candidate(candidate: MemoryCandidate, key: str | None) -> MemoryStatus:
+    """Decide auto-store policy from type, importance, durability, conflict, and sensitivity."""
+    memory_type = MemoryType(candidate.type)
+    durable = key is not None or memory_type in {MemoryType.USER_FACT, MemoryType.PREFERENCE, MemoryType.PROJECT_CONTEXT, MemoryType.WORKFLOW}
+    important = stream_importance_1_to_10(candidate.content, memory_type, candidate.confidence) >= 4
+    low_risk_sensitive = candidate.sensitivity in {"low", "medium"} and (bool(key) or memory_type in {MemoryType.USER_FACT, MemoryType.PREFERENCE} or "name" in candidate.content.lower())
+    auto_store = candidate.source == "user_message" and candidate.confidence >= 0.70 and durable and important and low_risk_sensitive
+    if candidate.sensitivity == "high":
+        auto_store = False
+    return MemoryStatus.ACTIVE if auto_store else MemoryStatus.PENDING_REVIEW
