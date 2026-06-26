@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '../components/ui/button'
 import { streamAgentMessage } from '../lib/api'
 
@@ -18,6 +18,15 @@ export default function Home() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const activeStream = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    const savedUserId = window.localStorage.getItem('memos-q-user-id')
+    if (savedUserId) setUserId(savedUserId)
+  }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem('memos-q-user-id', userId)
+  }, [userId])
 
   const submit = useCallback(async () => {
     const trimmed = message.trim()

@@ -165,6 +165,7 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
     recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False)
     log_timing(request_id, "memory_recall", (time.perf_counter() - start) * 1000)
     memory_context = format_memory_context(recalled)
+    append_chat_observations(user_id, request.source_session, request.message)
     messages = [
         QwenMessage("system", "Use relevant private ACTIVE memories only. Answer concisely by default. Do not produce long explanations unless the user asks for full code, comprehensive analysis, or detailed reasoning. Ask before saving sensitive or uncertain facts."),
         QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
