@@ -8,7 +8,7 @@ from memos_q.config import settings
 from memos_q.engine import MemoryCandidate, MemoryOS
 from memos_q.integrations.factory import build_memory_store
 from memos_q.integrations.qwen_cloud import QwenCloudClient, QwenMessage
-from memos_q.models import MemoryStatus
+from memos_q.models import MemoryStatus, MemoryType
 from memos_q.monitoring import memory_metrics as metrics
 
 celery_app = Celery(
@@ -25,6 +25,10 @@ celery_app.conf.update(
     task_default_retry_delay=60,
     task_routes={"memos_q.workers.celery_app.*": {"queue": "memory-maintenance"}},
     beat_schedule={
+        "nightly-memory-reflection": {
+            "task": "memos_q.workers.celery_app.reflect_all_active_users",
+            "schedule": 60 * 60 * 24,
+        },
         "nightly-memory-compaction": {
             "task": "memos_q.workers.celery_app.compact_all_active_users",
             "schedule": 60 * 60 * 24,
@@ -142,3 +146,27 @@ def evolve_memories_from_chat(
         saved += 1
     _memory_os.store.record_audit("job_success", "celery-memory-evolution", user_id, None, {"task_id": self.request.id, "saved": saved, "skipped": skipped})
     return {"saved": saved, "skipped": skipped}
+
+
+@celery_app.task(name="memos_q.workers.celery_app.reflect_all_active_users")
+def reflect_all_active_users() -> dict[str, str]:
+    """Queue Stanford-style reflection generation for every active user."""
+
+    return {user_id: reflect_user_memories.delay(user_id).id for user_id in _memory_os.store.list_user_ids()}
+
+
+@celery_app.task(bind=True, name="memos_q.workers.celery_app.reflect_user_memories", autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+def reflect_user_memories(self, user_id: str) -> dict[str, int]:
+    """Generate high-importance reflections from recent memory stream entries."""
+
+    stream = _memory_os.store.list_memory_stream(user_id)[-50:] if hasattr(_memory_os.store, "list_memory_stream") else []
+    if not stream:
+        return {"reflections": 0}
+    prompt = "Generate 1-3 concise durable reflections about the user. Return JSON array of strings.\n" + "\n".join(f"- {entry.content}" for entry in stream)
+    raw = _qwen.chat([QwenMessage("system", "Return strict JSON only."), QwenMessage("user", prompt)], model=settings.qwen_flash_model, temperature=0, max_tokens=settings.qwen_summary_max_tokens)
+    import json
+    reflections = [str(item) for item in json.loads(raw)][:3]
+    for reflection in reflections:
+        _memory_os.remember(user_id=user_id, content=reflection, memory_type=MemoryType.CONVERSATION_SUMMARY, source_session="reflection-worker", tags={"reflection", "celery"}, importance_score=0.9, metadata={"source": "reflection_worker"}, status=MemoryStatus.ACTIVE, actor="celery-reflection-agent")
+    _memory_os.store.record_audit("job_success", "celery-reflection", user_id, None, {"task_id": self.request.id, "reflections": len(reflections)})
+    return {"reflections": len(reflections)}

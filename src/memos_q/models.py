@@ -37,6 +37,16 @@ class MemoryConflictResolution(StrEnum):
     MANUAL_RESOLUTION = "manual_resolution"
 
 
+class MemoryStreamKind(StrEnum):
+    """Stanford-style memory stream entry categories."""
+
+    OBSERVATION = "observation"
+    REFLECTION = "reflection"
+    FACT = "fact"
+    PREFERENCE = "preference"
+    PROFILE = "profile"
+
+
 class MemoryType(StrEnum):
     """Supported memory layers and durable production categories."""
 
@@ -67,6 +77,28 @@ def utc_now() -> datetime:
     """Return a timezone-aware UTC timestamp."""
 
     return datetime.now(timezone.utc)
+
+
+@dataclass(slots=True)
+class MemoryStreamEntry:
+    """Raw memory stream event retained in Postgres/source-of-truth storage."""
+
+    user_id: str
+    content: str
+    kind: MemoryStreamKind | str = MemoryStreamKind.OBSERVATION
+    importance_score: int = 1
+    decay_rate: float = 0.01
+    status: MemoryStatus = MemoryStatus.ACTIVE
+    metadata: dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utc_now)
+    last_accessed_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        self.kind = MemoryStreamKind(self.kind)
+        self.status = MemoryStatus(self.status)
+        self.importance_score = max(1, min(10, int(self.importance_score)))
+        self.decay_rate = max(0.0, float(self.decay_rate))
 
 
 @dataclass(slots=True)

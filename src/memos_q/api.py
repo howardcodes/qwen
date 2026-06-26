@@ -19,7 +19,7 @@ from .config import settings
 from .engine import MemoryCandidate, MemoryOS
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
-from .models import MemoryStatus, MemoryType
+from .models import MemoryStatus, MemoryStreamEntry, MemoryStreamKind, MemoryType
 from .monitoring import memory_metrics as metrics
 from .monitoring.observability import add_prometheus_metrics, configure_opentelemetry
 
@@ -158,6 +158,8 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
     if pending_resolution is not None and pending_resolution.action in {"accepted_candidate", "kept_existing"}:
         text = "Got it — I updated your memory." if pending_resolution.action == "accepted_candidate" else "Got it — I kept the existing memory."
         return StreamingResponse(iter([text]), media_type="text/plain; charset=utf-8")
+
+    append_chat_observations(user_id, request.source_session, request.message)
 
     start = time.perf_counter()
     recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False)
@@ -343,6 +345,33 @@ def status_for_extracted_memory(memory: ExtractedMemory) -> MemoryStatus | None:
     if memory.confidence >= 0.90 and memory.sensitivity == "low":
         return MemoryStatus.ACTIVE
     return MemoryStatus.PENDING_REVIEW
+
+
+def append_chat_observations(user_id: str, source_session: str, message: str) -> None:
+    observations = classify_chat_observations(message)
+    for content, kind, importance in observations:
+        if hasattr(memory_os.store, "add_memory_stream_entry"):
+            memory_os.store.add_memory_stream_entry(
+                MemoryStreamEntry(user_id=user_id, content=content, kind=kind, importance_score=importance, metadata={"source_session": source_session, "source": "chat_observation"}),
+                actor="chat-observer",
+            )
+
+
+def classify_chat_observations(message: str) -> list[tuple[str, MemoryStreamKind, int]]:
+    text = message.strip()
+    lower = text.lower()
+    observations: list[tuple[str, MemoryStreamKind, int]] = [(f"User said: {text}", MemoryStreamKind.OBSERVATION, 2)]
+    import re
+    name = re.search(r"\bmy name is\s+([A-Z][\w'-]*)", text, re.I)
+    if name:
+        observations.append((f"User said their name is {name.group(1)}.", MemoryStreamKind.PROFILE, 7))
+    if "badminton" in lower and any(word in lower for word in ["like", "love", "enjoy"]):
+        observations.append(("User likes badminton.", MemoryStreamKind.PREFERENCE, 6))
+    if "exam" in lower and any(word in lower for word in ["difficult", "hard", "tough", "failed", "stress"]):
+        observations.append(("User said they had a difficult exam.", MemoryStreamKind.OBSERVATION, 5))
+    if "linear algebra" in lower:
+        observations.append(("User asked about linear algebra.", MemoryStreamKind.FACT, 4))
+    return observations[:5]
 
 
 def enqueue_memory_evolution(*, user_id: str, source_session: str, user_message: str, assistant_response: str, memory_context: str) -> None:
