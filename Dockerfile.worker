@@ -7,4 +7,4 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir -e '.[live,monitoring]'
 
-CMD ["celery", "-A", "memos_q.workers.celery_app.celery_app", "worker", "--loglevel=INFO"]
+CMD ["celery", "-A", "memos_q.workers.celery_app.celery_app", "worker", "--loglevel=INFO", "-Q", "memory-maintenance,celery"]
