@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, Memory, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
-from memos_q.store import memory_snapshot, memory_stream_snapshot
+from memos_q.models import AuditEvent, Memory, UserProfile, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
+from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot
 
 
 class PostgresMemoryStore:
@@ -124,6 +124,18 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    name TEXT,
+                    age INTEGER,
+                    occupation TEXT,
+                    timezone TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_created ON memory_stream(user_id, created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_status ON memory_stream(user_id, status)")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
@@ -144,6 +156,37 @@ class PostgresMemoryStore:
             if use_pgvector:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
         self.connection.commit()
+
+    def get_user_profile(self, user_id: str) -> UserProfile | None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT user_id, name, age, occupation, timezone, updated_at FROM user_profiles WHERE user_id = %s", (user_id,))
+            row = cursor.fetchone()
+        return UserProfile(user_id=row[0], name=row[1], age=row[2], occupation=row[3], timezone=row[4], updated_at=row[5]) if row else None
+
+    def upsert_user_profile(self, user_id: str, *, actor: str = "profile-agent", **changes: object) -> UserProfile:
+        previous = self.get_user_profile(user_id)
+        current = previous or UserProfile(user_id=user_id)
+        for key, value in changes.items():
+            if hasattr(current, key) and value not in (None, ""):
+                setattr(current, key, value)
+        current.updated_at = utc_now()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO user_profiles (user_id, name, age, occupation, timezone, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    name = COALESCE(EXCLUDED.name, user_profiles.name),
+                    age = COALESCE(EXCLUDED.age, user_profiles.age),
+                    occupation = COALESCE(EXCLUDED.occupation, user_profiles.occupation),
+                    timezone = COALESCE(EXCLUDED.timezone, user_profiles.timezone),
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (current.user_id, current.name, current.age, current.occupation, current.timezone, current.updated_at),
+            )
+            self._record_audit(cursor, "profile_upsert", actor, user_id, profile_snapshot(previous) if previous else None, profile_snapshot(current))
+        self.connection.commit()
+        return current
 
     def add_memory_stream_entry(self, entry: MemoryStreamEntry, *, actor: str = "memory-stream") -> MemoryStreamEntry:
         with self.connection.cursor() as cursor:

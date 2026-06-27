@@ -163,9 +163,9 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
 
     start = time.perf_counter()
     recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False)
+    profile = await run_in_threadpool(memory_os.get_user_profile, user_id)
     log_timing(request_id, "memory_recall", (time.perf_counter() - start) * 1000)
-    memory_context = format_memory_context(recalled)
-    append_chat_observations(user_id, request.source_session, request.message)
+    memory_context = format_memory_context(recalled, profile=profile)
     messages = [
         QwenMessage("system", "Use relevant private ACTIVE memories only. Answer concisely by default. Do not produce long explanations unless the user asks for full code, comprehensive analysis, or detailed reasoning. Ask before saving sensitive or uncertain facts."),
         QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
@@ -184,7 +184,6 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
         finally:
             assistant_response = "".join(response_parts)
             log_timing(request_id, "qwen_complete", (time.perf_counter() - start_request) * 1000, model=settings.qwen_chat_default_model, output_tokens=len(assistant_response.split()))
-            append_chat_observations(user_id, request.source_session, request.message)
             if assistant_response:
                 enqueue_memory_evolution(user_id=user_id, source_session=request.source_session, user_message=request.message, assistant_response=assistant_response, memory_context=memory_context)
             log_timing(request_id, "request_complete", 0)
@@ -332,19 +331,37 @@ def serialize_memory(memory: Any) -> dict[str, Any]:
     return {"id": memory.id, "user_id": memory.user_id, "content": memory.content, "memory_type": memory.memory_type.value, "source_session": memory.source_session, "confidence_score": memory.confidence_score, "confidence_reasons": memory.confidence_reasons, "importance_score": memory.importance_score, "novelty_score": memory.novelty_score, "stability_score": memory.stability_score, "status": memory.status.value, "sensitivity": memory.sensitivity, "approved_at": memory.approved_at.isoformat() if memory.approved_at else None, "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None, "conflicting_memory_id": memory.conflicting_memory_id, "conflict_reason": memory.conflict_reason, "version": memory.version, "tags": sorted(memory.tags), "created_at": memory.created_at.isoformat(), "updated_at": memory.updated_at.isoformat()}
 
 
-def format_memory_context(recalled: list[Any]) -> str:
-    if not recalled:
+def format_memory_context(recalled: list[Any], *, profile: Any | None = None) -> str:
+    sections: list[str] = []
+    if profile:
+        profile_lines = []
+        if getattr(profile, "name", None):
+            profile_lines.append(f"- Name: {profile.name}")
+        if getattr(profile, "age", None) is not None:
+            profile_lines.append(f"- Age: {profile.age}")
+        if getattr(profile, "occupation", None):
+            profile_lines.append(f"- Occupation: {profile.occupation}")
+        if getattr(profile, "timezone", None):
+            profile_lines.append(f"- Timezone: {profile.timezone}")
+        if profile_lines:
+            sections.append("User profile:\n" + "\n".join(profile_lines))
+    current = [item for item in recalled if item.memory.status == MemoryStatus.ACTIVE and item.memory.metadata.get("stream_kind") not in {MemoryStreamKind.OBSERVATION.value, MemoryStreamKind.PROFILE.value}]
+    if current:
+        sections.append("Relevant current memories:\n" + "\n".join(
+            f"- {item.memory.content} (confidence: {item.memory.confidence_score:.2f}, source: {item.memory.source_session}, updated_at: {item.memory.updated_at.isoformat()})"
+            for item in current
+        ))
+    if not sections:
         return "No prior memories."
-    return "\n".join(
-        f"- fact: {item.memory.content}\n  status: {item.memory.status.value}\n  confidence: {item.memory.confidence_score:.2f}\n  source: {item.memory.source_session}\n  updated_at: {item.memory.updated_at.isoformat()}"
-        for item in recalled
-    )
+    return "\n\n".join(sections)
 
 
 def status_for_extracted_memory(memory: ExtractedMemory) -> MemoryStatus | None:
     if memory.confidence < 0.60:
         return None
-    if memory.confidence >= 0.90 and memory.sensitivity == "low":
+    key = memory.key or ""
+    durable = key.startswith("profile.") or memory.type in {MemoryType.USER_FACT, MemoryType.PREFERENCE, MemoryType.PROJECT_CONTEXT, MemoryType.WORKFLOW}
+    if memory.confidence >= 0.70 and durable and memory.sensitivity in {"low", "medium"}:
         return MemoryStatus.ACTIVE
     return MemoryStatus.PENDING_REVIEW
 
@@ -406,7 +423,7 @@ def extract_durable_memories(user_message: str, assistant_response: str, convers
     prompt = (
         "Extract durable memories from the user message, assistant response, and context. "
         "Return only a JSON array of objects with content, type, key, value, confidence, sensitivity, source, should_remember, reason. "
-        "Allowed types: preference, user_fact, project_context, task, workflow. "
+        "Allowed types: preference, user_fact, project_context, task, workflow. Use canonical keys such as profile.name, profile.age, profile.occupation, profile.timezone, hobby.badminton.enjoyment. "
         "Allowed sensitivity: low, medium, high.\n"
         f"Context:\n{conversation_context[:settings.memory_extraction_max_input_chars]}\nUser Message:\n{user_message[:settings.memory_extraction_max_input_chars]}" + (f"\nAssistant Response:\n{assistant_response[:settings.memory_extraction_max_input_chars]}" if settings.memory_extraction_include_assistant_response else "")
     )
