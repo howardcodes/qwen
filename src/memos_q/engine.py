@@ -11,8 +11,8 @@ from typing import Protocol
 
 from .config import settings
 from .models import (
-    Memory, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictResolution, MemoryEdge, MemoryStatus,
-    MemoryType, RecallExplanation, RecallResult, RelationType, clamp_score, utc_now,
+    ChatTurn, Memory, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictResolution, MemoryEdge, MemoryStatus,
+    MemoryScope, MemorySource, MemoryType, RecallExplanation, RecallResult, RelationType, SessionState, clamp_score, utc_now,
 )
 from .scoring import TOKEN_RE, hybrid_retrieval_score, keyword_score, quality_scores, tokenize
 from .store import InMemoryStore
@@ -123,20 +123,46 @@ class MemoryOS:
     def get_user_profile(self, user_id: str):
         return self.store.get_user_profile(user_id) if hasattr(self.store, "get_user_profile") else None
 
+    def recent_turns(self, user_id: str, conversation_id: str, *, limit: int = 10) -> list[ChatTurn]:
+        return self.store.recent_conversation_turns(user_id, conversation_id, limit=limit) if hasattr(self.store, "recent_conversation_turns") else []
+
+    def append_turn(self, user_id: str, conversation_id: str, role: str, content: str) -> None:
+        if hasattr(self.store, "append_conversation_turn"):
+            self.store.append_conversation_turn(user_id, conversation_id, ChatTurn(role=role, content=content))
+
+    def get_session_state(self, user_id: str, conversation_id: str) -> SessionState:
+        return self.store.get_session_state(user_id, conversation_id) if hasattr(self.store, "get_session_state") else SessionState()
+
+    def update_session_state_from_turns(self, user_id: str, conversation_id: str, message: str, turns: Sequence[ChatTurn]) -> SessionState:
+        state = self.get_session_state(user_id, conversation_id)
+        text = " ".join([turn.content for turn in turns[-6:]] + [message])
+        entities = re.findall(r"\b[A-Z][a-zA-Z0-9_-]{2,}(?:\s+[A-Z][a-zA-Z0-9_-]{2,})?", text)
+        state.active_entities = list(dict.fromkeys([*state.active_entities, *entities]))[-12:]
+        topic_words = [w for w in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", message.lower()) if w not in CONTEXT_STOPWORDS]
+        if topic_words:
+            state.current_topic = " ".join(topic_words[:6])
+        if "?" in message:
+            state.open_questions = (state.open_questions + [message.strip()])[-5:]
+        if any(marker in message.lower() for marker in ["i want", "i need", "my goal", "help me"]):
+            state.user_goal = message.strip()[:300]
+        constraints = re.findall(r"(?:must|should|without|only|never|budget|deadline) [^.?!]+", message, flags=re.I)
+        state.constraints = list(dict.fromkeys([*state.constraints, *constraints]))[-10:]
+        return self.store.update_session_state(user_id, conversation_id, state) if hasattr(self.store, "update_session_state") else state
+
     def remember(self, *, user_id: str, content: str, memory_type: MemoryType | str = MemoryType.EPISODIC,
                  source_session: str, tags: Iterable[str] = (), confidence_score: float | None = None,
                  importance_score: float | None = None, novelty_score: float | None = None,
                  stability_score: float | None = None, metadata: dict[str, object] | None = None,
                  confidence_reasons: list[str] | None = None, status: MemoryStatus = MemoryStatus.ACTIVE,
-                 sensitivity: str = "low", actor: str = "memory-agent") -> Memory:
+                 sensitivity: str = "low", actor: str = "memory-agent", scope: MemoryScope | str | None = None, source: MemorySource | str | None = None) -> Memory:
         scores = quality_scores(content, self.store.list_memories(user_id))
         stream_importance = stream_importance_1_to_10(content, memory_type, confidence_score if confidence_score is not None else float(scores["confidence"]))
-        memory = Memory(user_id=user_id, content=content, memory_type=memory_type, source_session=source_session,
+        memory = Memory(user_id=user_id, content=content, memory_type=memory_type, source_session=source_session, scope=scope, source=source,
             confidence_score=confidence_score if confidence_score is not None else float(scores["confidence"]),
             importance_score=importance_score if importance_score is not None else stream_importance / 10,
             novelty_score=novelty_score if novelty_score is not None else float(scores["novelty"]),
             stability_score=stability_score if stability_score is not None else float(scores["stability"]),
-            tags=set(tags), metadata={**dict(metadata or {}), "stream_kind": memory_kind_for_type(memory_type).value, "stream_importance": stream_importance}, confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
+            tags=set(tags), metadata={**dict(metadata or {}), "scope": (scope.value if hasattr(scope, "value") else scope), "source": (source.value if hasattr(source, "value") else source), "stream_kind": memory_kind_for_type(memory_type).value, "stream_importance": stream_importance}, confidence_reasons=confidence_reasons or list(scores.get("confidence_reasons", [])),
             embedding=self._embed_text(content), status=status, sensitivity=sensitivity,
             approved_at=utc_now() if status == MemoryStatus.ACTIVE else None, last_confirmed_at=utc_now() if status == MemoryStatus.ACTIVE else None,
             last_seen_at=utc_now())
@@ -176,7 +202,7 @@ class MemoryOS:
         if same_key:
             existing = same_key[0]
             memory = self.remember(user_id=user_id, content=content, memory_type=candidate.type, source_session=source_session,
-                tags={"agent", "extracted", "conflict"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value},
+                tags={"agent", "extracted", "conflict"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value}, source=MemorySource.INFERRED,
                 confidence_score=candidate.confidence, sensitivity=candidate.sensitivity, status=MemoryStatus.PENDING_CONFLICT_CONFIRMATION, actor=actor)
             memory.conflicting_memory_id = existing.id
             memory.conflict_reason = f"same key {key} has different value"
@@ -187,7 +213,7 @@ class MemoryOS:
             return IngestionResult("conflict", memory=memory, existing_memory=existing, conflict=conflict, prompt=confirmation_prompt(existing, memory))
         lifecycle = policy_status_for_candidate(candidate, key)
         memory = self.remember(user_id=user_id, content=content, memory_type=candidate.type, source_session=source_session,
-            tags={"agent", "extracted"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value},
+            tags={"agent", "extracted"}, metadata={"source": candidate.source, "reason": candidate.reason, "key": key, "value": value}, source=MemorySource.INFERRED,
             confidence_score=candidate.confidence, sensitivity=candidate.sensitivity, status=lifecycle, actor=actor)
         return IngestionResult("created", memory=memory)
 
@@ -226,7 +252,7 @@ class MemoryOS:
         vector_candidates = self.store.vector_search(user_id, query_embedding, limit=settings.memory_recall_vector_top_k, include_inactive=include_pending_review)
         fallback = self.store.list_memories(user_id, include_inactive=include_pending_review)[:settings.memory_recall_fallback_limit]
         by_id = {m.id: m for m in fallback}; by_id.update({m.id: m for m in vector_candidates})
-        for memory in [m for m in by_id.values() if m.status in allowed]:
+        for memory in [m for m in by_id.values() if m.status in allowed and recallable_long_term_memory(m)]:
             if memory.embedding is None: memory.embedding = self._embed_text(memory.content)
             score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags, query_embedding=query_embedding)
             if score <= 0: continue
@@ -235,7 +261,7 @@ class MemoryOS:
         if hasattr(self.store, "list_memory_stream"):
             accessed_stream_ids: list[str] = []
             for entry in self.store.list_memory_stream(user_id, include_inactive=include_pending_review)[-settings.memory_recall_fallback_limit:]:
-                if entry.status not in allowed:
+                if entry.status not in allowed or entry.metadata.get("source") in {"raw_chat_log", "chat_observation"}:
                     continue
                 memory = memory_from_stream_entry(entry)
                 score, signals = hybrid_retrieval_score(query, memory, query_tags=query_tags, query_embedding=query_embedding)
@@ -311,6 +337,18 @@ class MemoryOS:
                     self.store.update_memory(dup.id, actor="compaction-agent", status=MemoryStatus.ARCHIVED); self.sync_memory_vector(dup); merged+=1
         return merged
 
+
+CONTEXT_STOPWORDS = {"what", "about", "this", "that", "they", "them", "these", "those", "safe", "safety", "same", "problem", "issue", "above", "with", "from", "have", "need", "want"}
+
+def recallable_long_term_memory(memory: Memory) -> bool:
+    return (
+        memory.status == MemoryStatus.ACTIVE
+        and memory.scope != MemoryScope.TEMPORARY_OBSERVATION
+        and memory.source != MemorySource.RAW_CHAT_LOG
+    )
+
+def message_has_unresolved_references(message: str) -> bool:
+    return bool(re.search(r"\b(they|them|these|those|that|it|above|this issue|same problem|what about|those places)\b", message, re.I))
 
 def conflict_aware_recall_filter(results: list[RecallResult], limit: int) -> list[RecallResult]:
     """Keep only current, confirmed memories and one winner per canonical key/topic."""

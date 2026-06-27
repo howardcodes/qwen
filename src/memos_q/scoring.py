@@ -71,6 +71,9 @@ def graph_proximity_score(memory: Memory, query_tags: Iterable[str]) -> float:
     return len(tags & memory.tags) / len(tags | memory.tags)
 
 
+SEMANTIC_RELEVANCE_THRESHOLD = 0.12
+
+
 def hybrid_retrieval_score(
     query: str,
     memory: Memory,
@@ -78,9 +81,21 @@ def hybrid_retrieval_score(
     query_tags: Iterable[str] = (),
     query_embedding: list[float] | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Compute Stanford-style relevance + importance + recency retrieval score."""
+    """Compute gated relevance first, then importance/recency boosts."""
 
     relevance = max(cosine_similarity(query_embedding, memory.embedding), semantic_score(query, memory, query_embedding=query_embedding), keyword_score(query, memory))
+    if relevance < SEMANTIC_RELEVANCE_THRESHOLD:
+        return 0.0, {
+            "relevance": relevance,
+            "vector": cosine_similarity(query_embedding, memory.embedding),
+            "semantic": semantic_score(query, memory, query_embedding=query_embedding),
+            "keyword": keyword_score(query, memory),
+            "recency": recency_score(memory.last_recalled_at or memory.updated_at),
+            "importance": memory.importance_score,
+            "confidence": memory.confidence_score,
+            "graph": graph_proximity_score(memory, query_tags),
+            "rejected_below_relevance_threshold": 1.0,
+        }
     signals = {
         "relevance": relevance,
         "vector": cosine_similarity(query_embedding, memory.embedding),

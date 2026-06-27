@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .models import AuditEvent, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
+from .models import AuditEvent, ChatTurn, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
 from .scoring import cosine_similarity
 
 T = TypeVar("T")
@@ -62,10 +62,30 @@ class InMemoryStore:
         self._stream_by_user: dict[str, set[str]] = defaultdict(set)
         self._by_user: dict[str, set[str]] = defaultdict(set)
         self._profiles: dict[str, UserProfile] = {}
+        self._conversation_turns: dict[tuple[str, str], list[ChatTurn]] = defaultdict(list)
+        self._session_state: dict[tuple[str, str], SessionState] = {}
 
 
     def get_user_profile(self, user_id: str) -> UserProfile | None:
         return self._profiles.get(user_id)
+
+    def append_conversation_turn(self, user_id: str, conversation_id: str, turn: ChatTurn, *, max_turns: int = 50) -> None:
+        key = (user_id, conversation_id)
+        self._conversation_turns[key].append(turn)
+        self._conversation_turns[key] = self._conversation_turns[key][-max_turns:]
+        self.record_audit("conversation_turn_append", "conversation_turns", conversation_id, None, {"role": turn.role, "content": turn.content})
+
+    def recent_conversation_turns(self, user_id: str, conversation_id: str, *, limit: int = 10) -> list[ChatTurn]:
+        return self._conversation_turns[(user_id, conversation_id)][-limit:]
+
+    def get_session_state(self, user_id: str, conversation_id: str) -> SessionState:
+        return self._session_state.get((user_id, conversation_id), SessionState())
+
+    def update_session_state(self, user_id: str, conversation_id: str, state: SessionState) -> SessionState:
+        state.updated_at = utc_now()
+        self._session_state[(user_id, conversation_id)] = state
+        self.record_audit("session_state_update", "session_state", conversation_id, None, session_state_snapshot(state))
+        return state
 
     def upsert_user_profile(self, user_id: str, *, actor: str = "profile-agent", **changes: object) -> UserProfile:
         profile = self._profiles.get(user_id) or UserProfile(user_id=user_id)
@@ -303,6 +323,9 @@ def memory_snapshot(memory: Memory) -> dict[str, object]:
         "content": memory.content,
         "memory_type": memory.memory_type.value,
         "source_session": memory.source_session,
+        "scope": memory.scope.value,
+        "source": memory.source.value,
+        "expires_at": memory.expires_at.isoformat() if memory.expires_at else None,
         "confidence_score": memory.confidence_score,
         "importance_score": memory.importance_score,
         "novelty_score": memory.novelty_score,
@@ -362,4 +385,15 @@ def profile_snapshot(profile: UserProfile) -> dict[str, object]:
         "occupation": profile.occupation,
         "timezone": profile.timezone,
         "updated_at": profile.updated_at.isoformat(),
+    }
+
+
+def session_state_snapshot(state: SessionState) -> dict[str, object]:
+    return {
+        "current_topic": state.current_topic,
+        "active_entities": list(state.active_entities),
+        "open_questions": list(state.open_questions),
+        "user_goal": state.user_goal,
+        "constraints": list(state.constraints),
+        "updated_at": state.updated_at.isoformat(),
     }

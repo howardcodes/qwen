@@ -16,10 +16,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import settings
-from .engine import MemoryOS
+from .engine import MemoryOS, message_has_unresolved_references
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
-from .models import MemoryStatus, MemoryStreamEntry, MemoryStreamKind, MemoryType
+from .models import ChatTurn, MemorySource, MemoryStatus, MemoryStreamEntry, MemoryStreamKind, MemoryType, SessionState
 from .monitoring import memory_metrics as metrics
 from .monitoring.observability import add_prometheus_metrics, configure_opentelemetry
 
@@ -42,10 +42,17 @@ class RememberRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatTurnModel(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant|system)$")
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
 class AgentChatRequest(BaseModel):
     """Request body for live Qwen-Agent/QwenCloud chat."""
 
     message: str = Field(..., min_length=1, max_length=8000)
+    conversation_id: str = Field(default="api-conversation", min_length=1, max_length=128)
+    recent_turns: list[ChatTurnModel] = Field(default_factory=list, max_length=20)
     source_session: str = Field(default="api-session", min_length=1, max_length=128)
 
 
@@ -159,16 +166,24 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
         text = "Got it — I updated your memory." if pending_resolution.action == "accepted_candidate" else "Got it — I kept the existing memory."
         return StreamingResponse(iter([text]), media_type="text/plain; charset=utf-8")
 
+    supplied_turns = [ChatTurn(role=turn.role, content=turn.content) for turn in request.recent_turns]
+    stored_turns = await run_in_threadpool(memory_os.recent_turns, user_id, request.conversation_id, limit=10)
+    recent_turns = (stored_turns + supplied_turns)[-10:]
+    session_state = await run_in_threadpool(memory_os.update_session_state_from_turns, user_id, request.conversation_id, request.message, recent_turns)
     append_chat_observations(user_id, request.source_session, request.message)
+    await run_in_threadpool(memory_os.append_turn, user_id, request.conversation_id, "user", request.message)
 
     start = time.perf_counter()
-    recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False)
+    should_recall_long_term = not message_has_unresolved_references(request.message) or not (recent_turns or session_state.active_entities or session_state.current_topic)
+    recalled = await run_in_threadpool(memory_os.recall, user_id, request.message, limit=settings.memory_recall_top_k, include_pending_review=False) if should_recall_long_term else []
     profile = await run_in_threadpool(memory_os.get_user_profile, user_id)
     log_timing(request_id, "memory_recall", (time.perf_counter() - start) * 1000)
     memory_context = format_memory_context(recalled, profile=profile)
+    conversation_context = format_recent_turns(recent_turns)
+    session_context = format_session_state(session_state)
     messages = [
-        QwenMessage("system", "Use relevant private ACTIVE memories only. Answer concisely by default. Do not produce long explanations unless the user asks for full code, comprehensive analysis, or detailed reasoning. Ask before saving sensitive or uncertain facts."),
-        QwenMessage("user", f"Recalled memories with provenance:\n{memory_context}\n\nUser: {request.message}"),
+        QwenMessage("system", SYSTEM_PROMPT_CONTRACT),
+        QwenMessage("user", f"Context priority order:\n1. Current user message\n2. Recent conversation turns\n3. Active session state\n4. Relevant long-term memories\n5. General knowledge\n\nRecent conversation turns:\n{conversation_context}\n\nActive session state:\n{session_context}\n\nLong-term memory context:\n{memory_context}\n\nUser: {request.message}"),
     ]
 
     def token_stream():
@@ -185,6 +200,7 @@ async def agent_chat(request: AgentChatRequest, user_id: str = Depends(authentic
             assistant_response = "".join(response_parts)
             log_timing(request_id, "qwen_complete", (time.perf_counter() - start_request) * 1000, model=settings.qwen_chat_default_model, output_tokens=len(assistant_response.split()))
             if assistant_response:
+                memory_os.append_turn(user_id, request.conversation_id, "assistant", assistant_response)
                 enqueue_memory_evolution(user_id=user_id, source_session=request.source_session, user_message=request.message, assistant_response=assistant_response, memory_context=memory_context)
             log_timing(request_id, "request_complete", 0)
 
@@ -328,7 +344,20 @@ def serialize_recall(result: Any) -> dict[str, Any]:
 
 
 def serialize_memory(memory: Any) -> dict[str, Any]:
-    return {"id": memory.id, "user_id": memory.user_id, "content": memory.content, "memory_type": memory.memory_type.value, "source_session": memory.source_session, "confidence_score": memory.confidence_score, "confidence_reasons": memory.confidence_reasons, "importance_score": memory.importance_score, "novelty_score": memory.novelty_score, "stability_score": memory.stability_score, "status": memory.status.value, "sensitivity": memory.sensitivity, "approved_at": memory.approved_at.isoformat() if memory.approved_at else None, "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None, "conflicting_memory_id": memory.conflicting_memory_id, "conflict_reason": memory.conflict_reason, "version": memory.version, "tags": sorted(memory.tags), "created_at": memory.created_at.isoformat(), "updated_at": memory.updated_at.isoformat()}
+    return {"id": memory.id, "user_id": memory.user_id, "content": memory.content, "memory_type": memory.memory_type.value, "scope": memory.scope.value, "status": memory.status.value, "source": memory.source.value, "expires_at": memory.expires_at.isoformat() if memory.expires_at else None, "source_session": memory.source_session, "confidence_score": memory.confidence_score, "confidence_reasons": memory.confidence_reasons, "importance_score": memory.importance_score, "novelty_score": memory.novelty_score, "stability_score": memory.stability_score, "sensitivity": memory.sensitivity, "approved_at": memory.approved_at.isoformat() if memory.approved_at else None, "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None, "conflicting_memory_id": memory.conflicting_memory_id, "conflict_reason": memory.conflict_reason, "version": memory.version, "tags": sorted(memory.tags), "created_at": memory.created_at.isoformat(), "updated_at": memory.updated_at.isoformat()}
+
+
+SYSTEM_PROMPT_CONTRACT = """Use recent conversation for follow-ups. Use long-term memory only for stable user facts/preferences. Never mention lack of saved memory when recent conversation contains enough context. Do not introduce unrelated memories unless directly relevant. Priority order: current message, recent conversation turns, active session state, relevant long-term memories, general knowledge. If a reference remains ambiguous after recent turns and session state, ask one concise clarification question without mentioning memory storage."""
+
+
+def format_recent_turns(turns: list[ChatTurn]) -> str:
+    if not turns:
+        return "No recent turns."
+    return "\n".join(f"- {turn.role}: {turn.content}" for turn in turns[-10:])
+
+
+def format_session_state(state: SessionState) -> str:
+    return json.dumps({"current_topic": state.current_topic, "active_entities": state.active_entities, "open_questions": state.open_questions, "user_goal": state.user_goal, "constraints": state.constraints}, ensure_ascii=False)
 
 
 def format_memory_context(recalled: list[Any], *, profile: Any | None = None) -> str:
@@ -377,7 +406,7 @@ def append_chat_observations(user_id: str, source_session: str, message: str) ->
             content=f"User said: {message.strip()}",
             kind=MemoryStreamKind.OBSERVATION,
             importance_score=estimate_observation_importance(message),
-            metadata={"source_session": source_session, "source": "chat_observation"},
+            metadata={"source_session": source_session, "source": MemorySource.RAW_CHAT_LOG.value},
         ),
         actor="chat-observer",
     )
@@ -427,7 +456,6 @@ def enqueue_memory_evolution(*, user_id: str, source_session: str, user_message:
                 ),
                 source_session=source_session,
                 actor="inline-memory-evolution",
-                status=status,
             )
             metrics.memories_created_total.inc()
             saved += 1
@@ -441,7 +469,7 @@ def extract_durable_memories(user_message: str, assistant_response: str, convers
     """Ask Qwen for strict JSON memories using message, response, and context."""
 
     prompt = (
-        "Extract durable memories from the user message, assistant response, and context. "
+        "Extract durable memories only from user-authored claims in the user message and context. Do not save assistant-generated assumptions or suggestions. "
         "Return only a JSON array of objects with content, type, key, value, confidence, sensitivity, source, should_remember, reason. "
         "Allowed types: preference, user_fact, project_context, task, workflow. Use canonical keys such as profile.name, profile.age, profile.occupation, profile.timezone, hobby.badminton.enjoyment. "
         "Allowed sensitivity: low, medium, high.\n"

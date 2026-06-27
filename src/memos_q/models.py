@@ -47,6 +47,20 @@ class MemoryStreamKind(StrEnum):
     PROFILE = "profile"
 
 
+class MemoryScope(StrEnum):
+    DURABLE_USER_PROFILE = "durable_user_profile"
+    PROJECT_CONTEXT = "project_context"
+    PREFERENCE = "preference"
+    TEMPORARY_OBSERVATION = "temporary_observation"
+
+
+class MemorySource(StrEnum):
+    EXPLICIT_USER = "explicit_user"
+    INFERRED = "inferred"
+    SYSTEM_OBSERVATION = "system_observation"
+    RAW_CHAT_LOG = "raw_chat_log"
+
+
 class MemoryType(StrEnum):
     """Supported memory layers and durable production categories."""
 
@@ -121,6 +135,8 @@ class Memory:
     content: str
     memory_type: MemoryType | str
     source_session: str
+    scope: MemoryScope | str | None = None
+    source: MemorySource | str | None = None
     confidence_score: float = 0.75
     importance_score: float = 0.5
     novelty_score: float = 0.5
@@ -145,6 +161,8 @@ class Memory:
 
     def __post_init__(self) -> None:
         self.memory_type = MemoryType(self.memory_type)
+        self.scope = MemoryScope(self.scope or default_scope_for_type(self.memory_type))
+        self.source = MemorySource(self.source or MemorySource.EXPLICIT_USER)
         self.status = MemoryStatus(self.status)
         self.confidence_score = clamp_score(self.confidence_score)
         self.importance_score = clamp_score(self.importance_score)
@@ -210,6 +228,33 @@ class AuditEvent:
     previous_value: dict[str, Any] | None
     new_value: dict[str, Any] | None
     timestamp: datetime = field(default_factory=utc_now)
+
+
+def default_scope_for_type(memory_type: MemoryType | str) -> MemoryScope:
+    memory_type = MemoryType(memory_type)
+    if memory_type == MemoryType.PREFERENCE:
+        return MemoryScope.PREFERENCE
+    if memory_type in {MemoryType.PROJECT_CONTEXT, MemoryType.WORKFLOW, MemoryType.TASK}:
+        return MemoryScope.PROJECT_CONTEXT
+    if memory_type in {MemoryType.EPISODIC, MemoryType.WORKING, MemoryType.CONVERSATION_SUMMARY}:
+        return MemoryScope.TEMPORARY_OBSERVATION
+    return MemoryScope.DURABLE_USER_PROFILE
+
+
+@dataclass(slots=True)
+class ChatTurn:
+    role: str
+    content: str
+
+
+@dataclass(slots=True)
+class SessionState:
+    current_topic: str | None = None
+    active_entities: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    user_goal: str | None = None
+    constraints: list[str] = field(default_factory=list)
+    updated_at: datetime = field(default_factory=utc_now)
 
 
 def clamp_score(value: float) -> float:
