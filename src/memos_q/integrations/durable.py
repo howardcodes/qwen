@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, Memory, UserProfile, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
-from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot
+from memos_q.models import AuditEvent, ChatTurn, Memory, UserProfile, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
+from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot, session_state_snapshot
 
 
 class PostgresMemoryStore:
@@ -136,6 +136,35 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_turns (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_state (
+                    user_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    current_topic TEXT,
+                    active_entities JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    open_questions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    user_goal TEXT,
+                    constraints JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (user_id, conversation_id)
+                )
+                """
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversation_turns_user_conversation_created ON conversation_turns(user_id, conversation_id, created_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_state_user_conversation ON session_state(user_id, conversation_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_created ON memory_stream(user_id, created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_status ON memory_stream(user_id, status)")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
@@ -156,6 +185,73 @@ class PostgresMemoryStore:
             if use_pgvector:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
         self.connection.commit()
+
+
+    def append_conversation_turn(self, user_id: str, conversation_id: str, turn: ChatTurn, *, max_turns: int = 50) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO conversation_turns (user_id, conversation_id, role, content) VALUES (%s, %s, %s, %s)",
+                (user_id, conversation_id, turn.role, turn.content),
+            )
+            cursor.execute(
+                """
+                DELETE FROM conversation_turns
+                WHERE id IN (
+                    SELECT id FROM conversation_turns
+                    WHERE user_id = %s AND conversation_id = %s
+                    ORDER BY created_at DESC, id DESC OFFSET %s
+                )
+                """,
+                (user_id, conversation_id, max_turns),
+            )
+            self._record_audit(cursor, "conversation_turn_append", "conversation_turns", conversation_id, None, {"role": turn.role, "content": turn.content})
+        self.connection.commit()
+
+    def recent_conversation_turns(self, user_id: str, conversation_id: str, *, limit: int = 10) -> list[ChatTurn]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT role, content FROM (
+                    SELECT role, content, created_at, id FROM conversation_turns
+                    WHERE user_id = %s AND conversation_id = %s
+                    ORDER BY created_at DESC, id DESC LIMIT %s
+                ) recent ORDER BY created_at, id
+                """,
+                (user_id, conversation_id, limit),
+            )
+            return [ChatTurn(role=row[0], content=row[1]) for row in cursor.fetchall()]
+
+    def get_session_state(self, user_id: str, conversation_id: str) -> SessionState:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT current_topic, active_entities, open_questions, user_goal, constraints, updated_at
+                FROM session_state WHERE user_id = %s AND conversation_id = %s
+                """,
+                (user_id, conversation_id),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return SessionState()
+        return SessionState(current_topic=row[0], active_entities=list(row[1] or []), open_questions=list(row[2] or []), user_goal=row[3], constraints=list(row[4] or []), updated_at=row[5])
+
+    def update_session_state(self, user_id: str, conversation_id: str, state: SessionState) -> SessionState:
+        state.updated_at = utc_now()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO session_state (user_id, conversation_id, current_topic, active_entities, open_questions, user_goal, constraints, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, conversation_id) DO UPDATE SET
+                    current_topic = EXCLUDED.current_topic, active_entities = EXCLUDED.active_entities,
+                    open_questions = EXCLUDED.open_questions, user_goal = EXCLUDED.user_goal,
+                    constraints = EXCLUDED.constraints, updated_at = EXCLUDED.updated_at
+                """,
+                (user_id, conversation_id, state.current_topic, json.dumps(state.active_entities), json.dumps(state.open_questions), state.user_goal, json.dumps(state.constraints), state.updated_at),
+            )
+            self._record_audit(cursor, "session_state_update", "session_state", conversation_id, None, session_state_snapshot(state))
+        self.connection.commit()
+        return state
 
     def get_user_profile(self, user_id: str) -> UserProfile | None:
         with self.connection.cursor() as cursor:

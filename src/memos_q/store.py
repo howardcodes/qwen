@@ -283,6 +283,12 @@ class JsonFileMemoryStore(InMemoryStore):
             for item in payload.get("profiles", []):
                 profile = _load_model(UserProfile, item)
                 self._profiles[profile.user_id] = profile
+            for item in payload.get("conversation_turns", []):
+                key = (item["user_id"], item["conversation_id"])
+                self._conversation_turns[key] = [_load_model(ChatTurn, turn) for turn in item.get("turns", [])]
+            for item in payload.get("session_state", []):
+                key = (item["user_id"], item["conversation_id"])
+                self._session_state[key] = _load_model(SessionState, item["state"])
             for item in payload.get("conflicts", []):
                 conflict = _load_model(MemoryConflict, item)
                 self._conflicts[conflict.id] = conflict
@@ -301,6 +307,14 @@ class JsonFileMemoryStore(InMemoryStore):
             "memories": [_dataclass_payload(item) for item in self._memories.values()],
             "stream": [_dataclass_payload(item) for item in self._stream.values()],
             "profiles": [_dataclass_payload(item) for item in self._profiles.values()],
+            "conversation_turns": [
+                {"user_id": user_id, "conversation_id": conversation_id, "turns": [_dataclass_payload(turn) for turn in turns]}
+                for (user_id, conversation_id), turns in self._conversation_turns.items()
+            ],
+            "session_state": [
+                {"user_id": user_id, "conversation_id": conversation_id, "state": _dataclass_payload(state)}
+                for (user_id, conversation_id), state in self._session_state.items()
+            ],
             "conflicts": [_dataclass_payload(item) for item in self._conflicts.values()],
             "edges": [_dataclass_payload(item) for item in self._edges.values()],
             "audit_log": [_dataclass_payload(item) for item in self._audit_log],
