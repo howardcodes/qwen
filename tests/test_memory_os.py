@@ -254,3 +254,17 @@ def test_postgres_store_exposes_public_record_audit_for_workers():
 
     assert any("INSERT INTO audit_log" in sql for sql, _ in calls if isinstance(sql, str))
     assert ("commit", None) in calls
+
+
+def test_json_file_store_persists_memories_across_instances(tmp_path):
+    from memos_q.store import JsonFileMemoryStore
+
+    store_path = tmp_path / "memory-store.json"
+    memory_os = MemoryOS(store=JsonFileMemoryStore(store_path), embedding_provider=RecordingEmbeddingProvider(), fallback_embedding_dimensions=2)
+    memory_os.remember(user_id="user-1", content="User prefers Baskerville typography.", source_session="session-1")
+    memory_os.store.upsert_user_profile("user-1", name="Morgan")
+
+    reloaded = MemoryOS(store=JsonFileMemoryStore(store_path), embedding_provider=RecordingEmbeddingProvider(), fallback_embedding_dimensions=2)
+
+    assert reloaded.recall("user-1", "What typography does the user prefer?", limit=1)[0].memory.content == "User prefers Baskerville typography."
+    assert reloaded.get_user_profile("user-1").name == "Morgan"

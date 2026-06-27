@@ -9,3 +9,5 @@ dist/
 .env.local
 frontend/.next/
 frontend/node_modules/
+
+.memos/

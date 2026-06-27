@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from memos_q.config import Settings, settings
 from memos_q.integrations.durable import AliCloudMemoryStore, PostgresMemoryStore
-from memos_q.store import InMemoryStore
+from memos_q.store import InMemoryStore, JsonFileMemoryStore
 
 
-def build_memory_store(config: Settings = settings) -> InMemoryStore | PostgresMemoryStore:
+def build_memory_store(config: Settings = settings) -> InMemoryStore | JsonFileMemoryStore | PostgresMemoryStore:
     """Return the configured memory store.
 
     ``MEMOS_STORE=alicloud`` is production mode: Postgres on ECS stores memory
@@ -22,4 +22,6 @@ def build_memory_store(config: Settings = settings) -> InMemoryStore | PostgresM
         store = PostgresMemoryStore(config)
         store.migrate()
         return store
-    return InMemoryStore()
+    if config.memos_store.lower() in {"memory", "inmemory", "in-memory"}:
+        return InMemoryStore()
+    return JsonFileMemoryStore(config.memos_json_path)

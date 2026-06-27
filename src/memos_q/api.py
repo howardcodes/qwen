@@ -401,18 +401,38 @@ def estimate_observation_importance(message: str) -> int:
 
 def enqueue_memory_evolution(*, user_id: str, source_session: str, user_message: str, assistant_response: str, memory_context: str) -> None:
     start = time.perf_counter()
+    saved = 0
+    skipped = 0
     try:
-        from .workers.celery_app import evolve_memories_from_chat
-
-        evolve_memories_from_chat.delay(
-            user_id=user_id,
-            source_session=source_session,
-            user_message=user_message,
-            assistant_response=assistant_response,
-            memory_context=memory_context,
-        )
-    except Exception:
-        metrics.qwen_errors_total.inc()
+        for extracted in extract_durable_memories(user_message, assistant_response, memory_context):
+            if not extracted.should_remember:
+                skipped += 1
+                continue
+            status = status_for_extracted_memory(extracted)
+            if status is None:
+                skipped += 1
+                continue
+            memory_os.ingest_candidate(
+                user_id=user_id,
+                candidate=MemoryCandidate(
+                    content=extracted.content,
+                    type=extracted.type,
+                    key=extracted.key,
+                    value=extracted.value,
+                    confidence=extracted.confidence,
+                    sensitivity=extracted.sensitivity,
+                    source=extracted.source,
+                    should_remember=extracted.should_remember,
+                    reason=extracted.reason,
+                ),
+                source_session=source_session,
+                actor="inline-memory-evolution",
+                status=status,
+            )
+            metrics.memories_created_total.inc()
+            saved += 1
+        refresh_memory_gauges(user_id)
+        memory_os.store.record_audit("job_success", "inline-memory-evolution", user_id, None, {"saved": saved, "skipped": skipped})
     finally:
         metrics.memory_extraction_latency_seconds.observe(time.perf_counter() - start)
 

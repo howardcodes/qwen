@@ -30,7 +30,8 @@ _DEFAULTS = {
     "environment": "development",
     "api_base_url": "http://localhost:8000",
     "frontend_url": "http://localhost:3000",
-    "memos_store": "memory",
+    "memos_store": "json",
+    "memos_json_path": ".memos/memory-store.json",
     "pinecone_api_key": "",
     "pinecone_host": "",
     "pinecone_namespace": "memos-q",
@@ -78,7 +79,8 @@ class Settings:
     environment: str = "development"
     api_base_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
-    memos_store: str = "memory"
+    memos_store: str = "json"
+    memos_json_path: str = ".memos/memory-store.json"
 
     qwen_api_key: str = ""
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -133,6 +135,7 @@ class Settings:
             api_base_url=os.getenv("API_BASE_URL", _DEFAULTS["api_base_url"]),
             frontend_url=os.getenv("FRONTEND_URL", _DEFAULTS["frontend_url"]),
             memos_store=os.getenv("MEMOS_STORE", _DEFAULTS["memos_store"]),
+            memos_json_path=os.getenv("MEMOS_JSON_PATH", _DEFAULTS["memos_json_path"]),
             qwen_api_key=os.getenv("QWEN_API_KEY", _DEFAULTS["qwen_api_key"]),
             qwen_base_url=os.getenv("QWEN_BASE_URL", _DEFAULTS["qwen_base_url"]),
             qwen_reasoning_model=os.getenv("QWEN_REASONING_MODEL", _DEFAULTS["qwen_reasoning_model"]),

@@ -2,11 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-@font-face {
-  font-family: "Optiver";
-  src: url("/fonts/Optiver-Regular.woff2") format("woff2");
-  font-display: swap;
-}
 @import 'reactflow/dist/style.css';
 
 html,
@@ -17,7 +12,7 @@ body,
 
 body {
   @apply bg-background text-foreground antialiased;
-  font-family: "Optiver", Arial, sans-serif;
+  font-family: Baskerville, "Baskerville Old Face", "Libre Baskerville", Georgia, serif;
   background-image:
     radial-gradient(circle at top left, rgba(14, 165, 233, 0.10), transparent 34rem),
     linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
