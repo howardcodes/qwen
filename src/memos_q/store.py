@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 
-from .models import AuditEvent, Memory, MemoryConflict, MemoryConflictResolution, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
+from .models import AuditEvent, Memory, MemoryStreamEntry, MemoryConflict, MemoryConflictResolution, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
 from .scoring import cosine_similarity
 
 
@@ -17,7 +17,28 @@ class InMemoryStore:
         self._edges: dict[str, MemoryEdge] = {}
         self._audit_log: list[AuditEvent] = []
         self._conflicts: dict[str, MemoryConflict] = {}
+        self._stream: dict[str, MemoryStreamEntry] = {}
+        self._stream_by_user: dict[str, set[str]] = defaultdict(set)
         self._by_user: dict[str, set[str]] = defaultdict(set)
+
+    def add_memory_stream_entry(self, entry: MemoryStreamEntry, *, actor: str = "memory-stream") -> MemoryStreamEntry:
+        self._stream[entry.id] = entry
+        self._stream_by_user[entry.user_id].add(entry.id)
+        self.record_audit("stream_append", actor, entry.id, None, memory_stream_snapshot(entry))
+        return entry
+
+    def list_memory_stream(self, user_id: str, *, include_inactive: bool = False) -> list[MemoryStreamEntry]:
+        entries = [self._stream[entry_id] for entry_id in self._stream_by_user[user_id]]
+        if not include_inactive:
+            entries = [entry for entry in entries if entry.status == MemoryStatus.ACTIVE]
+        return sorted(entries, key=lambda item: item.created_at)
+
+    def update_memory_stream_access(self, entry_ids: Iterable[str], *, actor: str = "recall") -> None:
+        for entry_id in entry_ids:
+            if entry_id in self._stream:
+                previous = memory_stream_snapshot(self._stream[entry_id])
+                self._stream[entry_id].last_accessed_at = utc_now()
+                self.record_audit("stream_access", actor, entry_id, previous, memory_stream_snapshot(self._stream[entry_id]))
 
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
         self._memories[memory.id] = memory
@@ -201,4 +222,19 @@ def conflict_snapshot(conflict: MemoryConflict) -> dict[str, object]:
         "created_at": conflict.created_at.isoformat(),
         "resolved_at": conflict.resolved_at.isoformat() if conflict.resolved_at else None,
         "resolution": conflict.resolution,
+    }
+
+
+def memory_stream_snapshot(entry: MemoryStreamEntry) -> dict[str, object]:
+    return {
+        "id": entry.id,
+        "user_id": entry.user_id,
+        "content": entry.content,
+        "kind": entry.kind.value,
+        "importance_score": entry.importance_score,
+        "last_accessed_at": entry.last_accessed_at.isoformat(),
+        "created_at": entry.created_at.isoformat(),
+        "decay_rate": entry.decay_rate,
+        "status": entry.status.value,
+        "metadata": dict(entry.metadata),
     }

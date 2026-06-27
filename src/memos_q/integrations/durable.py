@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, Memory, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
-from memos_q.store import memory_snapshot
+from memos_q.models import AuditEvent, Memory, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, utc_now
+from memos_q.store import memory_snapshot, memory_stream_snapshot
 
 
 class PostgresMemoryStore:
@@ -108,6 +108,24 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_stream (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    importance_score INTEGER NOT NULL,
+                    last_accessed_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    decay_rate DOUBLE PRECISION NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                )
+                """
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_created ON memory_stream(user_id, created_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_status ON memory_stream(user_id, status)")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'low'")
@@ -125,6 +143,38 @@ class PostgresMemoryStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories USING gin(tags)")
             if use_pgvector:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
+        self.connection.commit()
+
+    def add_memory_stream_entry(self, entry: MemoryStreamEntry, *, actor: str = "memory-stream") -> MemoryStreamEntry:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO memory_stream (id, user_id, content, kind, importance_score, last_accessed_at, created_at, decay_rate, status, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (entry.id, entry.user_id, entry.content, entry.kind.value, entry.importance_score, entry.last_accessed_at, entry.created_at, entry.decay_rate, entry.status.value, json.dumps(entry.metadata)),
+            )
+            self._record_audit(cursor, "stream_append", actor, entry.id, None, memory_stream_snapshot(entry))
+        self.connection.commit()
+        return entry
+
+    def list_memory_stream(self, user_id: str, *, include_inactive: bool = False) -> list[MemoryStreamEntry]:
+        status_clause = "" if include_inactive else "AND status = 'active'"
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT id, user_id, content, kind, importance_score, last_accessed_at, created_at, decay_rate, status, metadata
+                FROM memory_stream WHERE user_id = %s {status_clause} ORDER BY created_at
+                """,
+                (user_id,),
+            )
+            return [memory_stream_from_row(row) for row in cursor.fetchall()]
+
+    def update_memory_stream_access(self, entry_ids: Iterable[str], *, actor: str = "recall") -> None:
+        if not entry_ids:
+            return
+        with self.connection.cursor() as cursor:
+            cursor.execute("UPDATE memory_stream SET last_accessed_at = now() WHERE id = ANY(%s)", (list(entry_ids),))
         self.connection.commit()
 
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
@@ -409,6 +459,20 @@ class PostgresMemoryStore:
             )
             return [memory_from_row(row) for row in cursor.fetchall()]
 
+    def record_audit(
+        self,
+        action: str,
+        actor: str,
+        memory_id: str,
+        previous_value: dict[str, object] | None,
+        new_value: dict[str, object] | None,
+    ) -> None:
+        """Append an audit event outside an existing store mutation transaction."""
+
+        with self.connection.cursor() as cursor:
+            self._record_audit(cursor, action, actor, memory_id, previous_value, new_value)
+        self.connection.commit()
+
     def _record_audit(
         self,
         cursor: Any,
@@ -529,6 +593,38 @@ class AliCloudMemoryStore:
     def migrate(self) -> None:
         self.records.migrate()
 
+    def add_memory_stream_entry(self, entry: MemoryStreamEntry, *, actor: str = "memory-stream") -> MemoryStreamEntry:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO memory_stream (id, user_id, content, kind, importance_score, last_accessed_at, created_at, decay_rate, status, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (entry.id, entry.user_id, entry.content, entry.kind.value, entry.importance_score, entry.last_accessed_at, entry.created_at, entry.decay_rate, entry.status.value, json.dumps(entry.metadata)),
+            )
+            self._record_audit(cursor, "stream_append", actor, entry.id, None, memory_stream_snapshot(entry))
+        self.connection.commit()
+        return entry
+
+    def list_memory_stream(self, user_id: str, *, include_inactive: bool = False) -> list[MemoryStreamEntry]:
+        status_clause = "" if include_inactive else "AND status = 'active'"
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT id, user_id, content, kind, importance_score, last_accessed_at, created_at, decay_rate, status, metadata
+                FROM memory_stream WHERE user_id = %s {status_clause} ORDER BY created_at
+                """,
+                (user_id,),
+            )
+            return [memory_stream_from_row(row) for row in cursor.fetchall()]
+
+    def update_memory_stream_access(self, entry_ids: Iterable[str], *, actor: str = "recall") -> None:
+        if not entry_ids:
+            return
+        with self.connection.cursor() as cursor:
+            cursor.execute("UPDATE memory_stream SET last_accessed_at = now() WHERE id = ANY(%s)", (list(entry_ids),))
+        self.connection.commit()
+
     def add_memory(self, memory: Memory, *, actor: str = "memory-agent") -> Memory:
         saved = self.records.add_memory(memory, actor=actor)
         self.sync_memory_vector(saved)
@@ -540,7 +636,8 @@ class AliCloudMemoryStore:
         return updated
 
     def sync_memory_vector(self, memory: Memory) -> None:
-        if memory.status == MemoryStatus.ACTIVE:
+        indexable = memory.importance_score >= 0.4 or memory.memory_type in {MemoryType.USER_FACT, MemoryType.PREFERENCE, MemoryType.SEMANTIC, MemoryType.CONVERSATION_SUMMARY} or memory.metadata.get("stream_kind") in {"profile", "fact", "preference", "reflection"}
+        if memory.status == MemoryStatus.ACTIVE and indexable:
             self.vectors.upsert_memory(memory)
         else:
             self.vectors.delete_memory(memory.id)
@@ -678,3 +775,10 @@ def conflict_from_row(row: Iterable[Any]) -> MemoryConflict:
         conflict_type=row[4], existing_content=row[5], candidate_content=row[6], status=MemoryConflictStatus(row[7]),
         created_at=row[8], resolved_at=row[9], resolution=row[10],
     )
+
+
+def memory_stream_from_row(row: Iterable[Any]) -> MemoryStreamEntry:
+    entry_id, user_id, content, kind, importance_score, last_accessed_at, created_at, decay_rate, status, metadata = row
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return MemoryStreamEntry(id=entry_id, user_id=user_id, content=content, kind=MemoryStreamKind(kind), importance_score=importance_score, last_accessed_at=last_accessed_at, created_at=created_at, decay_rate=decay_rate, status=MemoryStatus(status), metadata=metadata or {})

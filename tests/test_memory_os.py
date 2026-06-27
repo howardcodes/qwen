@@ -214,3 +214,55 @@ def test_reconciliation_fixes_missing_and_stale_vectors():
     assert active.id in vectors.ids
     assert "stale-id" not in vectors.ids
     assert report["fixed"] == 2
+
+
+def test_recall_searches_memory_stream_observations_without_hardcoded_extractors():
+    from memos_q.models import MemoryStreamEntry, MemoryStreamKind
+
+    memory_os = build_memory_os()
+    memory_os.store.add_memory_stream_entry(
+        MemoryStreamEntry(
+            user_id="user-1",
+            content="User said: Hello, my name is Morgan and I enjoy squash.",
+            kind=MemoryStreamKind.OBSERVATION,
+            importance_score=5,
+            metadata={"source_session": "chat-1"},
+        )
+    )
+
+    results = memory_os.recall("user-1", "What is my name?", limit=3)
+
+    assert results
+    assert results[0].memory.metadata["stream_entry_id"]
+    assert "Morgan" in results[0].memory.content
+
+
+def test_postgres_store_exposes_public_record_audit_for_workers():
+    from memos_q.integrations.durable import PostgresMemoryStore
+
+    calls = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            calls.append((sql, params))
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            calls.append(("commit", None))
+
+    store = PostgresMemoryStore.__new__(PostgresMemoryStore)
+    store.connection = FakeConnection()
+
+    store.record_audit("job_start", "celery-memory-evolution", "user-1", None, {"task_id": "task-1"})
+
+    assert any("INSERT INTO audit_log" in sql for sql, _ in calls if isinstance(sql, str))
+    assert ("commit", None) in calls
