@@ -159,9 +159,10 @@ def test_structured_non_conflicting_memory_auto_active_and_upserted():
         source_session="session-1",
     )
 
-    assert result.action == "created"
-    assert result.memory.status == MemoryStatus.ACTIVE
-    assert result.memory.id in vectors.ids
+    assert result.action == "profile_updated"
+    assert result.memory is None
+    assert memory_os.get_user_profile("user-1").name == "Mark"
+    assert not vectors.ids
 
 
 def test_duplicate_structured_memory_does_not_create_duplicate_row():
@@ -170,37 +171,24 @@ def test_duplicate_structured_memory_does_not_create_duplicate_row():
     memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s1")
     result = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("My name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
 
-    assert result.action == "duplicate"
-    assert len(memory_os.inspect("user-1", include_inactive=True)) == 1
+    assert result.action == "profile_updated"
+    assert memory_os.get_user_profile("user-1").name == "Mark"
+    assert len(memory_os.inspect("user-1", include_inactive=True)) == 0
 
 
-def test_conflict_confirmation_accept_and_reject_paths_sync_vectors():
+def test_profile_facts_update_structured_profile_without_vector_conflict_rows():
     from memos_q.engine import MemoryCandidate
     vectors = RecordingVectorIndex()
     memory_os = MemoryOS(embedding_provider=RecordingEmbeddingProvider(), vector_index=vectors, fallback_embedding_dimensions=2)
-    old = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Joshua.", "user_fact", "profile.name", "Joshua", 0.98), source_session="s1").memory
-    conflict = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
 
-    assert conflict.action == "conflict"
-    assert conflict.memory.status == MemoryStatus.PENDING_CONFLICT_CONFIRMATION
-    assert "Joshua" in conflict.prompt and "Mark" in conflict.prompt
-    assert conflict.memory.id not in vectors.ids
+    first = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Joshua.", "user_fact", "profile.name", "Joshua", 0.98), source_session="s1")
+    second = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
 
-    accepted = memory_os.resolve_pending_conflict("user-1", "Yes update it")
-    memories = {m.id: m for m in memory_os.inspect("user-1", include_inactive=True)}
-    assert accepted.action == "accepted_candidate"
-    assert memories[old.id].status == MemoryStatus.SUPERSEDED
-    assert memories[conflict.memory.id].status == MemoryStatus.ACTIVE
-    assert old.id not in vectors.ids and conflict.memory.id in vectors.ids
-
-    memory_os = MemoryOS(embedding_provider=RecordingEmbeddingProvider(), vector_index=RecordingVectorIndex(), fallback_embedding_dimensions=2)
-    old = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Joshua.", "user_fact", "profile.name", "Joshua", 0.98), source_session="s1").memory
-    conflict = memory_os.ingest_candidate(user_id="user-1", candidate=MemoryCandidate("User's name is Mark.", "user_fact", "profile.name", "Mark", 0.98), source_session="s2")
-    rejected = memory_os.resolve_pending_conflict("user-1", "No, keep Joshua")
-    memories = {m.id: m for m in memory_os.inspect("user-1", include_inactive=True)}
-    assert rejected.action == "kept_existing"
-    assert memories[old.id].status == MemoryStatus.ACTIVE
-    assert memories[conflict.memory.id].status == MemoryStatus.REJECTED
+    assert first.action == "profile_updated"
+    assert second.action == "profile_updated"
+    assert memory_os.get_user_profile("user-1").name == "Mark"
+    assert memory_os.inspect("user-1", include_inactive=True) == []
+    assert not vectors.ids
 
 
 def test_reconciliation_fixes_missing_and_stale_vectors():

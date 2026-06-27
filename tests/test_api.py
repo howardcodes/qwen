@@ -79,7 +79,7 @@ def test_integrations_status_reports_runtime_sections():
 
 
 
-def test_agent_chat_includes_pending_review_memory_in_context(monkeypatch):
+def test_agent_chat_uses_filtered_active_memory_context(monkeypatch):
     client = TestClient(app)
     memory_os.remember(
         user_id="demo-user",
@@ -101,5 +101,37 @@ def test_agent_chat_includes_pending_review_memory_in_context(monkeypatch):
 
     assert response.status_code == 200
     prompt = captured["messages"][1].content
-    assert "User's name is Mark" in prompt
-    assert "status: pending_review" in prompt
+    assert "User's name is Mark" not in prompt
+    assert "pending_review" not in prompt
+    assert "User likes to play badminton" in prompt
+
+
+def test_agent_chat_formats_structured_profile_without_raw_profile_stream(monkeypatch):
+    client = TestClient(app)
+    memory_os.store.upsert_user_profile("profile-user", name="Mark", age=25)
+    memory_os.store.add_memory_stream_entry(
+        __import__("memos_q.models", fromlist=["MemoryStreamEntry"]).MemoryStreamEntry(
+            user_id="profile-user",
+            content="User's name is Mark.",
+            kind="profile",
+            importance_score=8,
+            metadata={"source_session": "s1", "stream_kind": "profile"},
+        )
+    )
+    captured = {}
+
+    def fake_stream(messages, model=None, max_tokens=None):
+        captured["messages"] = messages
+        yield "ok"
+
+    monkeypatch.setattr("memos_q.api.qwen_client.chat_stream", fake_stream)
+    monkeypatch.setattr("memos_q.api.enqueue_memory_evolution", lambda **kwargs: None)
+
+    response = client.post("/agent/chat", headers={"x-user-id": "profile-user"}, json={"message": "What is my name?"})
+
+    assert response.status_code == 200
+    prompt = captured["messages"][1].content
+    assert "User profile:" in prompt
+    assert "- Name: Mark" in prompt
+    assert "- Age: 25" in prompt
+    assert "User's name is Mark." not in prompt

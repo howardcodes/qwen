@@ -120,6 +120,9 @@ class MemoryOS:
         self.conflict_detector = conflict_detector
         self.vector_index = vector_index
 
+    def get_user_profile(self, user_id: str):
+        return self.store.get_user_profile(user_id) if hasattr(self.store, "get_user_profile") else None
+
     def remember(self, *, user_id: str, content: str, memory_type: MemoryType | str = MemoryType.EPISODIC,
                  source_session: str, tags: Iterable[str] = (), confidence_score: float | None = None,
                  importance_score: float | None = None, novelty_score: float | None = None,
@@ -156,6 +159,14 @@ class MemoryOS:
         if not candidate.should_remember:
             return IngestionResult("skipped")
         content, key, value = normalize_candidate(candidate)
+        if key and key.startswith("profile.") and hasattr(self.store, "upsert_user_profile"):
+            profile_field = key.removeprefix("profile.")
+            if profile_field in {"name", "age", "occupation", "timezone"} and candidate.confidence >= 0.70 and candidate.sensitivity in {"low", "medium"}:
+                cast_value: object = int(value) if profile_field == "age" and str(value).isdigit() else value
+                profile = self.store.upsert_user_profile(user_id, actor=actor, **{profile_field: cast_value})
+                if hasattr(self.store, "add_memory_stream_entry"):
+                    self.store.add_memory_stream_entry(MemoryStreamEntry(user_id=user_id, content=content, kind=MemoryStreamKind.PROFILE, importance_score=stream_importance_1_to_10(content, candidate.type, candidate.confidence), metadata={"source_session": source_session, "key": key, "value": value}), actor=actor)
+                return IngestionResult("profile_updated")
         same_key = [m for m in self.store.list_memories(user_id) if m.memory_type == MemoryType(candidate.type) and m.metadata.get("key") == key]
         for old in same_key:
             if values_equal(str(old.metadata.get("value", "")), value):
@@ -234,7 +245,7 @@ class MemoryOS:
                 results.append(RecallResult(memory=memory, score=score, explanation=RecallExplanation(memory.source_session, memory.confidence_score, memory.updated_at, signals, self._reasoning_path(query, memory, signals))))
             if accessed_stream_ids and hasattr(self.store, "update_memory_stream_access"):
                 self.store.update_memory_stream_access(accessed_stream_ids, actor="recall")
-        return sorted(results, key=lambda item: item.score, reverse=True)[:limit]
+        return conflict_aware_recall_filter(results, limit)
 
     def forget(self, user_id: str, memory_id: str, *, actor: str = "user") -> Memory:
         memory = self._owned_memory(user_id, memory_id)
@@ -301,6 +312,24 @@ class MemoryOS:
         return merged
 
 
+def conflict_aware_recall_filter(results: list[RecallResult], limit: int) -> list[RecallResult]:
+    """Keep only current, confirmed memories and one winner per canonical key/topic."""
+
+    allowed = {MemoryStatus.ACTIVE}
+    ranked = sorted((item for item in results if item.memory.status in allowed), key=lambda item: item.score, reverse=True)
+    by_key: dict[str, RecallResult] = {}
+    unkeyed: list[RecallResult] = []
+    for item in ranked:
+        key = str(item.memory.metadata.get("key") or "")
+        if not key:
+            unkeyed.append(item)
+            continue
+        current = by_key.get(key)
+        if current is None or (item.memory.updated_at, item.score) > (current.memory.updated_at, current.score):
+            by_key[key] = item
+    preferred = sorted(by_key.values(), key=lambda item: (item.memory.memory_type == MemoryType.CONVERSATION_SUMMARY, item.score), reverse=True)
+    return (preferred + unkeyed)[:limit]
+
 def normalize_candidate(candidate: MemoryCandidate) -> tuple[str, str | None, str]:
     key = candidate.key or infer_key(candidate.content)
     value = str(candidate.value or infer_value(candidate.content, key) or "").strip()
@@ -311,14 +340,18 @@ def infer_key(content: str) -> str | None:
     lower=content.lower()
     if re.search(r"\bmy name is\b|user'?s name is", lower): return "profile.name"
     if "email" in lower: return "profile.email"
-    if "company" in lower or "work at" in lower: return "profile.company"
+    if "company" in lower or "work at" in lower: return "profile.occupation"
+    if "years old" in lower or re.search(r"\bage\b", lower): return "profile.age"
+    if "timezone" in lower: return "profile.timezone"
     if "language" in lower and ("prefer" in lower or "speaks" in lower): return "preference.language"
     if "theme" in lower: return "preference.ui_theme"
     return _subject_key(content)
 
 def infer_value(content: str, key: str | None) -> str | None:
     if key == "profile.name":
-        m=re.search(r"(?:my name is|user'?s name is)\s+([A-Z][\w'-]*)", content, re.I); return m.group(1) if m else None
+        m=re.search(r"(?:my name is|user'?s name is|i am|i'm)\s+([A-Z][\w'-]*)", content, re.I); return m.group(1) if m else None
+    if key == "profile.age":
+        m=re.search(r"\b(\d{1,3})\s*(?:years old|yo|y/o)?\b", content, re.I); return m.group(1) if m else None
     return None
 
 def values_equal(a: str, b: str) -> bool: return a.strip().casefold() == b.strip().casefold()

@@ -80,6 +80,18 @@ def utc_now() -> datetime:
 
 
 @dataclass(slots=True)
+class UserProfile:
+    """Structured identity facts that are source-of-truth outside vector recall."""
+
+    user_id: str
+    name: str | None = None
+    age: int | None = None
+    occupation: str | None = None
+    timezone: str | None = None
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class MemoryStreamEntry:
     """Raw memory stream event retained in Postgres/source-of-truth storage."""
 

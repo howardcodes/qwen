@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 
-from .models import AuditEvent, Memory, MemoryStreamEntry, MemoryConflict, MemoryConflictResolution, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
+from .models import AuditEvent, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictResolution, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
 from .scoring import cosine_similarity
 
 
@@ -20,6 +20,22 @@ class InMemoryStore:
         self._stream: dict[str, MemoryStreamEntry] = {}
         self._stream_by_user: dict[str, set[str]] = defaultdict(set)
         self._by_user: dict[str, set[str]] = defaultdict(set)
+        self._profiles: dict[str, UserProfile] = {}
+
+
+    def get_user_profile(self, user_id: str) -> UserProfile | None:
+        return self._profiles.get(user_id)
+
+    def upsert_user_profile(self, user_id: str, *, actor: str = "profile-agent", **changes: object) -> UserProfile:
+        profile = self._profiles.get(user_id) or UserProfile(user_id=user_id)
+        previous = profile_snapshot(profile) if user_id in self._profiles else None
+        for key, value in changes.items():
+            if hasattr(profile, key) and value not in (None, ""):
+                setattr(profile, key, value)
+        profile.updated_at = utc_now()
+        self._profiles[user_id] = profile
+        self.record_audit("profile_upsert", actor, user_id, previous, profile_snapshot(profile))
+        return profile
 
     def add_memory_stream_entry(self, entry: MemoryStreamEntry, *, actor: str = "memory-stream") -> MemoryStreamEntry:
         self._stream[entry.id] = entry
@@ -237,4 +253,15 @@ def memory_stream_snapshot(entry: MemoryStreamEntry) -> dict[str, object]:
         "decay_rate": entry.decay_rate,
         "status": entry.status.value,
         "metadata": dict(entry.metadata),
+    }
+
+
+def profile_snapshot(profile: UserProfile) -> dict[str, object]:
+    return {
+        "user_id": profile.user_id,
+        "name": profile.name,
+        "age": profile.age,
+        "occupation": profile.occupation,
+        "timezone": profile.timezone,
+        "updated_at": profile.updated_at.isoformat(),
     }
