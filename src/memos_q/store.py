@@ -4,9 +4,50 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import fields
+from datetime import datetime
+import json
+from pathlib import Path
+from typing import Any, TypeVar
 
-from .models import AuditEvent, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictResolution, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
+from .models import AuditEvent, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, utc_now
 from .scoring import cosine_similarity
+
+T = TypeVar("T")
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, set):
+        return sorted(value)
+    if hasattr(value, "value"):
+        return value.value
+    if isinstance(value, dict):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def _dataclass_payload(instance: Any) -> dict[str, Any]:
+    return {field.name: _json_ready(getattr(instance, field.name)) for field in fields(instance)}
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _load_model(cls: type[T], payload: dict[str, Any]) -> T:
+    data = dict(payload)
+    for field in fields(cls):
+        if field.name not in data:
+            continue
+        if field.type is datetime or "datetime" in str(field.type):
+            data[field.name] = _parse_datetime(data[field.name])
+    if cls is Memory and isinstance(data.get("tags"), list):
+        data["tags"] = set(data["tags"])
+    return cls(**data)
 
 
 class InMemoryStore:
@@ -194,6 +235,63 @@ class InMemoryStore:
             memory.version += 1
             memory.updated_at = utc_now()
             self.record_audit(action, actor, memory.id, previous, memory_snapshot(memory))
+
+
+class JsonFileMemoryStore(InMemoryStore):
+    """Durable local store that persists the in-memory repository to JSON."""
+
+    def __init__(self, path: str | Path) -> None:
+        super().__init__()
+        self.path = Path(path)
+        self._loading = False
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        self._loading = True
+        try:
+            payload = json.loads(self.path.read_text())
+            for item in payload.get("memories", []):
+                memory = _load_model(Memory, item)
+                self._memories[memory.id] = memory
+                self._by_user[memory.user_id].add(memory.id)
+            for item in payload.get("stream", []):
+                entry = _load_model(MemoryStreamEntry, item)
+                self._stream[entry.id] = entry
+                self._stream_by_user[entry.user_id].add(entry.id)
+            for item in payload.get("profiles", []):
+                profile = _load_model(UserProfile, item)
+                self._profiles[profile.user_id] = profile
+            for item in payload.get("conflicts", []):
+                conflict = _load_model(MemoryConflict, item)
+                self._conflicts[conflict.id] = conflict
+            for item in payload.get("edges", []):
+                edge = _load_model(MemoryEdge, item)
+                self._edges[edge.id] = edge
+            self._audit_log = [_load_model(AuditEvent, item) for item in payload.get("audit_log", [])]
+        finally:
+            self._loading = False
+
+    def _persist(self) -> None:
+        if self._loading:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "memories": [_dataclass_payload(item) for item in self._memories.values()],
+            "stream": [_dataclass_payload(item) for item in self._stream.values()],
+            "profiles": [_dataclass_payload(item) for item in self._profiles.values()],
+            "conflicts": [_dataclass_payload(item) for item in self._conflicts.values()],
+            "edges": [_dataclass_payload(item) for item in self._edges.values()],
+            "audit_log": [_dataclass_payload(item) for item in self._audit_log],
+        }
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        tmp_path.replace(self.path)
+
+    def record_audit(self, *args: Any, **kwargs: Any) -> None:
+        super().record_audit(*args, **kwargs)
+        self._persist()
 
 
 def memory_snapshot(memory: Memory) -> dict[str, object]:
