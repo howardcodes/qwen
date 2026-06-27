@@ -299,3 +299,20 @@ def test_raw_chat_observations_are_not_recalled_as_long_term_memory():
     )
 
     assert memory_os.recall("user-1", "EntityA", limit=3) == []
+
+
+def test_json_store_persists_in_session_and_cross_session_memory(tmp_path):
+    from memos_q.models import ChatTurn
+    from memos_q.store import JsonFileMemoryStore
+
+    store_path = tmp_path / "memory.json"
+    memory_os = MemoryOS(store=JsonFileMemoryStore(store_path), embedding_provider=RecordingEmbeddingProvider(), fallback_embedding_dimensions=2)
+    memory_os.append_turn("user-1", "conversation-1", "user", "Let's compare Atlas and Nova.")
+    memory_os.update_session_state_from_turns("user-1", "conversation-1", "Are they safe?", [ChatTurn("user", "Let's compare Atlas and Nova.")])
+    memory_os.remember(user_id="user-1", content="User prefers concise responses.", source_session="session-1", memory_type="preference")
+
+    reloaded = MemoryOS(store=JsonFileMemoryStore(store_path), embedding_provider=RecordingEmbeddingProvider(), fallback_embedding_dimensions=2)
+
+    assert [turn.content for turn in reloaded.recent_turns("user-1", "conversation-1")] == ["Let's compare Atlas and Nova."]
+    assert reloaded.get_session_state("user-1", "conversation-1").active_entities == ["Let", "Atlas", "Nova", "Are"]
+    assert reloaded.recall("user-1", "concise responses")
