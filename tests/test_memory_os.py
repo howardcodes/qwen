@@ -235,3 +235,34 @@ def test_recall_searches_memory_stream_observations_without_hardcoded_extractors
     assert results
     assert results[0].memory.metadata["stream_entry_id"]
     assert "Morgan" in results[0].memory.content
+
+
+def test_postgres_store_exposes_public_record_audit_for_workers():
+    from memos_q.integrations.durable import PostgresMemoryStore
+
+    calls = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            calls.append((sql, params))
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            calls.append(("commit", None))
+
+    store = PostgresMemoryStore.__new__(PostgresMemoryStore)
+    store.connection = FakeConnection()
+
+    store.record_audit("job_start", "celery-memory-evolution", "user-1", None, {"task_id": "task-1"})
+
+    assert any("INSERT INTO audit_log" in sql for sql, _ in calls if isinstance(sql, str))
+    assert ("commit", None) in calls

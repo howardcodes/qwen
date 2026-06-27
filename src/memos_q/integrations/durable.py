@@ -459,6 +459,20 @@ class PostgresMemoryStore:
             )
             return [memory_from_row(row) for row in cursor.fetchall()]
 
+    def record_audit(
+        self,
+        action: str,
+        actor: str,
+        memory_id: str,
+        previous_value: dict[str, object] | None,
+        new_value: dict[str, object] | None,
+    ) -> None:
+        """Append an audit event outside an existing store mutation transaction."""
+
+        with self.connection.cursor() as cursor:
+            self._record_audit(cursor, action, actor, memory_id, previous_value, new_value)
+        self.connection.commit()
+
     def _record_audit(
         self,
         cursor: Any,
