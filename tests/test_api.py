@@ -135,3 +135,58 @@ def test_agent_chat_formats_structured_profile_without_raw_profile_stream(monkey
     assert "- Name: Mark" in prompt
     assert "- Age: 25" in prompt
     assert "User's name is Mark." not in prompt
+
+
+def test_context_dependent_followup_uses_recent_turns_before_long_term_memory(monkeypatch):
+    client = TestClient(app)
+    memory_os.remember(
+        user_id="ctx-user",
+        content="User prefers unrelated durable Atlas notebooks.",
+        source_session="profile",
+        importance_score=1.0,
+    )
+    captured = {}
+
+    def fake_stream(messages, model=None, max_tokens=None):
+        captured["messages"] = messages
+        yield "They refer to EntityA, EntityB, and EntityC."
+
+    monkeypatch.setattr("memos_q.api.qwen_client.chat_stream", fake_stream)
+    monkeypatch.setattr("memos_q.api.enqueue_memory_evolution", lambda **kwargs: None)
+
+    response = client.post(
+        "/agent/chat",
+        headers={"x-user-id": "ctx-user"},
+        json={
+            "conversation_id": "conv-1",
+            "message": "Are they safe?",
+            "recent_turns": [
+                {"role": "assistant", "content": "Consider EntityA, EntityB, and EntityC for the trip."}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt = captured["messages"][1].content
+    assert "EntityA, EntityB, and EntityC" in prompt
+    assert "User prefers unrelated durable Atlas notebooks" not in prompt
+
+
+def test_agent_chat_prompt_contract_mentions_recent_context_and_memory_limits(monkeypatch):
+    client = TestClient(app)
+    captured = {}
+
+    def fake_stream(messages, model=None, max_tokens=None):
+        captured["messages"] = messages
+        yield "ok"
+
+    monkeypatch.setattr("memos_q.api.qwen_client.chat_stream", fake_stream)
+    monkeypatch.setattr("memos_q.api.enqueue_memory_evolution", lambda **kwargs: None)
+
+    response = client.post("/agent/chat", headers={"x-user-id": "contract-user"}, json={"message": "Hello"})
+
+    assert response.status_code == 200
+    system = captured["messages"][0].content
+    assert "Use recent conversation for follow-ups" in system
+    assert "Use long-term memory only for stable user facts/preferences" in system
+    assert "Never mention lack of saved memory" in system

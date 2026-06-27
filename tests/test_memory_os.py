@@ -268,3 +268,34 @@ def test_json_file_store_persists_memories_across_instances(tmp_path):
 
     assert reloaded.recall("user-1", "What typography does the user prefer?", limit=1)[0].memory.content == "User prefers Baskerville typography."
     assert reloaded.get_user_profile("user-1").name == "Morgan"
+
+
+def test_recall_rejects_unrelated_memory_despite_high_importance_and_recency():
+    memory_os = build_memory_os()
+    memory_os.remember(
+        user_id="user-1",
+        content="User strongly prefers zygomorphic orchid taxonomy notes.",
+        source_session="profile",
+        importance_score=1.0,
+    )
+
+    results = memory_os.recall("user-1", "voltage regulator solder bridge", limit=5)
+
+    assert results == []
+
+
+def test_raw_chat_observations_are_not_recalled_as_long_term_memory():
+    from memos_q.models import MemorySource, MemoryStreamEntry, MemoryStreamKind
+
+    memory_os = build_memory_os()
+    memory_os.store.add_memory_stream_entry(
+        MemoryStreamEntry(
+            user_id="user-1",
+            content="User said: EntityA EntityB EntityC were discussed.",
+            kind=MemoryStreamKind.OBSERVATION,
+            importance_score=10,
+            metadata={"source_session": "chat", "source": MemorySource.RAW_CHAT_LOG.value},
+        )
+    )
+
+    assert memory_os.recall("user-1", "EntityA", limit=3) == []
