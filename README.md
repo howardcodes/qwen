@@ -1,102 +1,113 @@
-# MemOS-Q: A Self-Evolving Memory Operating System for AI Agents
+# MemOS-Q
 
-Designed for QwenCloud, **MemOS-Q** is a production-oriented memory layer that enables AI agents to remember, reason, adapt, and self-correct across conversations, documents, images, and external tools.
+MemOS-Q is a Qwen-powered memory operating system for AI agents. It pairs a focused Next.js chat UI with a FastAPI backend that can persist memories, recall relevant context, stream Qwen responses, ingest multimodal inputs, run background maintenance, and expose production observability.
 
-Unlike stateless chatbots that rely only on context windows, MemOS-Q introduces persistent memory with confidence scoring, conflict resolution, multimodal understanding, explainable recall, autonomous memory maintenance, and live production integrations.
+## Current Project Snapshot
 
-## What Is Integrated Now?
-
-This repository includes runnable integration points for the requested stack. Copy `.env.example` to `.env`, add your keys, and run either the full Docker Compose stack or individual local development processes.
-
-| Area | Stack | Current implementation |
-| --- | --- | --- |
-| Frontend | Next.js 12, Tailwind CSS, shadcn/ui-style components, React Flow | `frontend/` dashboard with integration status, memory architecture graph, and live agent chat. |
-| Backend | FastAPI, Qwen-Agent | FastAPI app with memory endpoints, QwenCloud chat, Qwen-Agent endpoint, Qwen3-VL ingestion, and integration status. |
-| Models | Qwen3.5-Plus, Qwen3.5-Flash, Qwen3-VL-Plus, Qwen Batch API | `QwenCloudClient` calls DashScope/OpenAI-compatible endpoints for reasoning, flash classification, vision extraction, and batch creation. |
-| Storage | Postgres on ECS, Pinecone, Redis on ECS, MinIO on ECS | Postgres memory-record adapter, Pinecone cosine vector recall for Qwen/DashScope embeddings, Redis cache helper, and MinIO/S3 object helper. Docker Compose remains available for local service smoke tests. |
-| Background jobs | Celery | Celery worker for compaction and Qwen-powered session summarization. |
-| Monitoring | Langfuse, OpenTelemetry, Prometheus, Grafana | Langfuse trace decorator, FastAPI OpenTelemetry wiring, `/metrics`, Prometheus scrape config, and Grafana provisioning. |
-| Deployment | Alibaba ECS + Docker | API, worker, frontend, Postgres, Redis, MinIO, Prometheus, Grafana, and OTel Collector run on Alibaba ECS; Pinecone remains managed externally. |
-
-## Recommended Project Architecture
-
-| Component | Recommended |
+| Layer | Current implementation |
 | --- | --- |
-| Compute | Alibaba ECS |
-| LLM + embeddings | Qwen / DashScope |
-| Vector DB | Pinecone |
-| Memory records | Postgres on ECS |
-| Queue/cache | Redis on ECS |
-| File storage | MinIO on ECS |
-| Observability | no change |
+| Frontend | Next.js 12 + React 18 + Tailwind chat page in `frontend/`, centered `MemOS-Q` header, streaming chat composer, persisted demo user ID, and lightweight response formatting for Markdown-style emphasis, code, lists, and quotes. |
+| Backend API | FastAPI app in `src/memos_q/api.py` with health, memory CRUD/review, recall, streaming chat, Qwen-Agent, Qwen3-VL ingestion, maintenance, vector reconciliation, integration status, and Prometheus metrics endpoints. |
+| Memory engine | `MemoryOS` supports durable records, conversation turns, profile/session state, conflict handling, explainable recall, maintenance, scoring, and fallback embeddings for tests/development. |
+| Model integrations | DashScope/OpenAI-compatible Qwen client for chat streaming, reasoning/classification, embeddings, Qwen3-VL extraction, and optional Qwen-Agent integration. |
+| Storage modes | JSON file store by default for local development, in-memory test store, PostgreSQL store, and Alibaba-oriented store with PostgreSQL records plus Pinecone vector recall, Redis, and MinIO/S3 helpers. |
+| Background jobs | Celery worker app for memory compaction and Qwen-powered conversation summarization. |
+| Observability | Prometheus `/metrics`, optional OpenTelemetry FastAPI instrumentation, Langfuse tracing hooks, Prometheus config, Grafana provisioning, and an OpenTelemetry Collector config. |
+| Deployment | Dockerfiles for API, worker, and frontend plus `docker-compose.yml` for API, worker, frontend, PostgreSQL/pgvector, Redis, MinIO, Prometheus, Grafana, and OTel Collector. |
+
+## Repository Layout
+
+```text
+frontend/                  Next.js chat UI and API client
+src/memos_q/api.py          FastAPI service and endpoint definitions
+src/memos_q/engine.py       MemoryOS orchestration and maintenance logic
+src/memos_q/store.py        JSON/in-memory/Postgres-compatible memory storage
+src/memos_q/integrations/   Qwen, storage, Pinecone, Redis, and S3 adapters
+src/memos_q/workers/        Celery app and background tasks
+src/memos_q/monitoring/     Prometheus, OpenTelemetry, and Langfuse helpers
+monitoring/                 Prometheus, Grafana, and OTel Collector configs
+tests/                      Unit/API tests for memory, embeddings, and FastAPI
+```
 
 ## Prerequisites
 
-Install the tools that match the way you want to run the project:
+- Python 3.10+
+- Node.js 20+ and npm for the frontend
+- Docker Engine with Docker Compose v2 for the full local stack
+- Optional Qwen/DashScope API key for live model calls
+- Optional Pinecone, Langfuse, and object-storage credentials for production-like deployments
 
-- **Docker path:** Docker Engine with Docker Compose v2.
-- **Local backend path:** Python 3.10+.
-- **Local frontend path:** Node.js 20+ and npm.
-- **Live model calls:** a QwenCloud/DashScope API key.
-- **Langfuse tracing:** Langfuse public and secret keys, if you want traces in Langfuse.
+## Configuration
 
-## Configure Secrets and Runtime Settings
-
-All editable credentials live in `.env`, which is intentionally ignored by Git.
+The backend loads environment variables directly and also reads a repository-root `.env` file when present. Create one manually for Docker Compose or local runs:
 
 ```bash
-cp .env.example .env
-```
+cat > .env <<'ENV'
+MEMOS_ENV=development
+FRONTEND_URL=http://localhost:3000
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 
-Then edit `.env` and replace placeholders such as:
+# Local defaults
+MEMOS_STORE=json
+MEMOS_JSON_PATH=.memos/memory-store.json
+POSTGRES_USER=memos
+POSTGRES_PASSWORD=memos
+POSTGRES_DB=memos
+POSTGRES_DSN=postgresql://memos:memos@postgres:5432/memos
+REDIS_URL=redis://:ecs-2030@redis:6379/0
+CELERY_BROKER_URL=redis://:ecs-2030@redis:6379/1
+CELERY_RESULT_BACKEND=redis://:ecs-2030@redis:6379/2
+S3_ENDPOINT_URL=http://minio:9000
+S3_ACCESS_KEY_ID=memos
+S3_SECRET_ACCESS_KEY=memos-password
+S3_BUCKET=memos-q
+MINIO_ROOT_USER=memos
+MINIO_ROOT_PASSWORD=memos-password
 
-```bash
-QWEN_API_KEY=replace-with-your-qwen-api-key
+# Live Qwen/DashScope settings
+QWEN_API_KEY=
+QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+QWEN_CHAT_DEFAULT_MODEL=qwen3.5-flash
+QWEN_REASONING_MODEL=qwen3.5-plus
+QWEN_FLASH_MODEL=qwen3.5-flash
+QWEN_VL_MODEL=qwen3-vl-plus
 QWEN_EMBEDDING_MODEL=text-embedding-v4
 QWEN_EMBEDDING_DIMENSIONS=1024
-# Set true in production to fail closed if Alibaba/Qwen embedding calls fail.
-QWEN_REQUIRE_LIVE_EMBEDDINGS=true
-LANGFUSE_PUBLIC_KEY=replace-with-langfuse-public-key
-LANGFUSE_SECRET_KEY=replace-with-langfuse-secret-key
-POSTGRES_DSN=postgresql://memos:replace-with-postgres-password@postgres.internal:5432/memos
-PINECONE_API_KEY=replace-with-pinecone-api-key
-PINECONE_HOST=https://memos-q-vectors-xxxx.svc.aped-4627-b74a.pinecone.io
-S3_ENDPOINT_URL=http://minio.internal:9000
-S3_ACCESS_KEY_ID=replace-with-minio-access-key
-S3_SECRET_ACCESS_KEY=replace-with-minio-secret-key
+QWEN_REQUIRE_LIVE_EMBEDDINGS=false
+
+# Optional production services
+PINECONE_API_KEY=
+PINECONE_HOST=
+PINECONE_INDEX=memos-q-vectors
+PINECONE_NAMESPACE=memos-q
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_HOST=https://cloud.langfuse.com
+MEMOS_ENABLE_OTEL=false
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+ENV
 ```
 
-Use these storage modes:
+Storage modes:
+
+- `MEMOS_STORE=json` — default local development mode using `.memos/memory-store.json`.
+- `MEMOS_STORE=memory` — ephemeral mode for tests and quick experiments.
+- `MEMOS_STORE=postgres` — PostgreSQL-backed memory records.
+- `MEMOS_STORE=alicloud` — production-oriented mode using PostgreSQL records with managed/external vector recall and Alibaba-compatible services.
+
+Set `QWEN_REQUIRE_LIVE_EMBEDDINGS=true` only when the Qwen embedding service must be available; otherwise the app can use deterministic fallback embeddings for development and tests.
+
+## Run the Full Stack with Docker Compose
 
 ```bash
-# Production on Alibaba Cloud: ECS runs the API/worker plus Postgres, Redis,
-# and MinIO; Qwen/DashScope creates embeddings, and Pinecone searches vectors
-# with cosine similarity.
-MEMOS_STORE=alicloud
-QWEN_REQUIRE_LIVE_EMBEDDINGS=true
-
-# Development/test-only in-memory store. Do not use for production.
-MEMOS_STORE=memory
-
-# Development-only PostgreSQL store without Pinecone.
-MEMOS_STORE=postgres
-```
-
-## Run Everything with Docker Compose
-
-This is the intended full-stack execution path.
-
-```bash
-cp .env.example .env
-# Edit .env with your real QwenCloud/Langfuse/storage values.
 docker compose up --build
 ```
 
-Open the services:
+Open:
 
-- Frontend dashboard: <http://localhost:3000>
+- Frontend chat: <http://localhost:3000>
 - FastAPI docs: <http://localhost:8000/docs>
-- FastAPI health: <http://localhost:8000/health>
+- Health check: <http://localhost:8000/health>
 - Prometheus: <http://localhost:9090>
 - Grafana: <http://localhost:3001>
 - MinIO console: <http://localhost:9001>
@@ -104,61 +115,32 @@ Open the services:
 Useful Docker commands:
 
 ```bash
-# Check whether the API container is running and healthy.
-docker compose ps api
-
-# Follow API startup logs if localhost:8000 refuses connections.
-docker compose logs -f api
-
-# Rebuild only the API after backend edits.
-docker compose up --build api
-
-# Run the Celery worker with the rest of the stack.
-docker compose up --build worker
-
-# View app logs.
+docker compose ps
 docker compose logs -f api worker frontend
-
-# Stop services but keep volumes.
+docker compose up --build api
+docker compose up --build frontend
 docker compose down
-
-# Stop services and remove Postgres/MinIO/Grafana volumes.
 docker compose down -v
 ```
 
-The API service waits for healthy PostgreSQL and Redis containers before it starts, and the frontend waits for the API health check before starting. If the browser reports `POST http://localhost:8000/agent/chat net::ERR_CONNECTION_REFUSED`, the API container is not reachable; run `docker compose ps api` and `docker compose logs -f api` first.
+## Run Locally Without Docker
 
-## Run the Backend Locally
-
-Use this mode when you want FastAPI running on your machine instead of in Docker.
+### Backend
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[api,live,monitoring,test]'
-cp .env.example .env
+MEMOS_STORE=json uvicorn memos_q.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-For local development without PostgreSQL, set `MEMOS_STORE=memory` in `.env`, then run:
+For an ephemeral backend:
 
 ```bash
-uvicorn memos_q.api:app --host 0.0.0.0 --port 8000 --reload
+MEMOS_STORE=memory uvicorn memos_q.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-For local FastAPI with Docker-managed Postgres/Redis/MinIO, run the backing services first and then start Uvicorn:
-
-```bash
-docker compose up -d postgres redis minio otel-collector prometheus grafana
-MEMOS_STORE=postgres \
-POSTGRES_DSN=postgresql://memos:memos@localhost:5432/memos \
-REDIS_URL=redis://localhost:6379/0 \
-S3_ENDPOINT_URL=http://localhost:9000 \
-uvicorn memos_q.api:app --host 0.0.0.0 --port 8000 --reload
-```
-
-## Run the Frontend Locally
-
-In a second terminal, install and run the Next.js dashboard:
+### Frontend
 
 ```bash
 cd frontend
@@ -168,30 +150,17 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000 npm run dev
 
 Then open <http://localhost:3000>.
 
-## Run Celery Locally
-
-Start Redis first, then run the worker from the repository root:
+### Worker
 
 ```bash
 docker compose up -d redis
 source .venv/bin/activate
-CELERY_BROKER_URL=redis://localhost:6379/1 \
-CELERY_RESULT_BACKEND=redis://localhost:6379/2 \
+CELERY_BROKER_URL=redis://:ecs-2030@localhost:6379/1 \
+CELERY_RESULT_BACKEND=redis://:ecs-2030@localhost:6379/2 \
 celery -A memos_q.workers.celery_app.celery_app worker --loglevel=INFO
 ```
 
-If you want scheduled jobs from the configured Celery beat schedule, run beat in another terminal:
-
-```bash
-source .venv/bin/activate
-CELERY_BROKER_URL=redis://localhost:6379/1 \
-CELERY_RESULT_BACKEND=redis://localhost:6379/2 \
-celery -A memos_q.workers.celery_app.celery_app beat --loglevel=INFO
-```
-
 ## API Smoke Tests
-
-After the API is running, use these commands to verify the core flow.
 
 ```bash
 curl http://localhost:8000/health
@@ -213,42 +182,42 @@ curl -X POST http://localhost:8000/memories \
 curl -X POST http://localhost:8000/recall \
   -H 'Content-Type: application/json' \
   -H 'x-user-id: demo-user' \
-  -d '{
-    "query": "How should I answer this user about agents?",
-    "limit": 3
-  }'
+  -d '{"query": "How should I answer this user about agents?", "limit": 3}'
+```
+
+```bash
+curl -N -X POST http://localhost:8000/agent/chat \
+  -H 'Content-Type: application/json' \
+  -H 'x-user-id: demo-user' \
+  -d '{"message": "What do you remember about me?", "source_session": "smoke-test"}'
 ```
 
 ```bash
 curl http://localhost:8000/integrations/status
 ```
 
-Live QwenCloud calls require a real `QWEN_API_KEY` in `.env`:
+## Important Endpoints
 
-```bash
-curl -X POST http://localhost:8000/agent/chat \
-  -H 'Content-Type: application/json' \
-  -H 'x-user-id: demo-user' \
-  -d '{
-    "message": "What do you remember about me?",
-    "source_session": "live-qwen-smoke-test"
-  }'
-```
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Service health. |
+| `POST /memories` | Create a memory for the authenticated `x-user-id`. |
+| `POST /recall` | Retrieve relevant memories with explainable scores. |
+| `POST /agent/chat` | Stream a Qwen-backed memory-aware chat response. |
+| `POST /agent/qwen-agent` | Run the optional Qwen-Agent integration. |
+| `POST /ingest/vision` | Extract memory candidates from an image/document URL with Qwen3-VL. |
+| `GET /users/me/memories` | Inspect active or inactive memories. |
+| `POST /users/me/memories/{memory_id}/approve` | Approve a pending memory. |
+| `POST /users/me/memories/{memory_id}/reject` | Reject a pending memory. |
+| `PATCH /users/me/memories/{memory_id}` | Edit a memory. |
+| `POST /users/me/memories/{memory_id}/archive` | Archive a memory. |
+| `DELETE /users/me/memories/{memory_id}` | Delete a memory. |
+| `POST /users/me/maintenance` | Run maintenance for the current user. |
+| `POST /admin/reconcile-vectors` | Reconcile vector storage for the current user. |
+| `GET /integrations/status` | Return frontend-readable integration configuration status. |
+| `GET /metrics` | Prometheus metrics. |
 
-Qwen3-VL ingestion requires a reachable image or document URL:
-
-```bash
-curl -X POST http://localhost:8000/ingest/vision \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "user_id": "demo-user",
-    "image_url": "https://example.com/diagram.png",
-    "source_session": "vision-smoke-test",
-    "prompt": "Extract durable project memory facts from this image."
-  }'
-```
-
-## Run Tests and Checks
+## Testing and Validation
 
 ```bash
 pytest -q
@@ -265,94 +234,19 @@ node -c frontend/tailwind.config.js
 ```
 
 ```bash
-python - <<'PY'
-import tomllib
-from pathlib import Path
-with Path('pyproject.toml').open('rb') as file:
-    tomllib.load(file)
-print('pyproject ok')
-PY
-```
-
-When npm registry access is available, you can also validate the frontend dependency graph and production build:
-
-```bash
 cd frontend
-npm install
 npm run build
-```
-
-## Important Endpoints
-
-- `GET /health` — service health.
-- `POST /memories` — create an auditable memory.
-- `POST /recall` — retrieve memories with explainable scoring.
-- `POST /agent/chat` — live QwenCloud-backed memory-aware agent response.
-- `POST /agent/qwen-agent` — live Qwen-Agent assistant response.
-- `POST /ingest/vision` — Qwen3-VL multimodal memory extraction.
-- `POST /users/{user_id}/maintenance` — synchronous maintenance run.
-- `GET /integrations/status` — frontend-readable status for configured integrations.
-- `GET /metrics` — Prometheus metrics.
-
-## Architecture
-
-```text
-Next.js Dashboard
-   ↓
-FastAPI + Qwen-Agent
-   ↓
-Memory Pipeline
-   ├── Retrieval Agent
-   ├── Memory Agent
-   ├── Profile Agent
-   ├── Audit Agent
-   └── Celery Compaction Agent
-   ↓
-Qwen / DashScope Models
-   ├── Qwen3.5-Plus
-   ├── Qwen3.5-Flash
-   ├── Qwen3-VL-Plus
-   └── Qwen Batch API
-   ↓
-Alibaba ECS: Postgres records / Redis queue-cache / MinIO files
-   ↓
-Pinecone Vector DB
-   ↓
-Prometheus + Grafana / OpenTelemetry / Langfuse
-```
-
-## Python API Example
-
-```python
-from memos_q import MemoryOS
-
-memory_os = MemoryOS()
-
-memory_os.remember(
-    user_id="user-1",
-    content="User prefers concise responses.",
-    memory_type="semantic",
-    source_session="session-12",
-    tags={"preference", "communication"},
-)
-
-results = memory_os.recall("user-1", "How should I answer this user?")
-
-for item in results:
-    print(item.memory.content)
-    print(item.explanation.reasoning_path)
 ```
 
 ## Troubleshooting
 
-- If `docker compose` fails because `.env` is missing, run `cp .env.example .env` first.
-- If `localhost:3000` shows `POST http://localhost:8000/agent/chat net::ERR_CONNECTION_REFUSED`, the FastAPI container is down or unhealthy. Run `docker compose ps api` and `docker compose logs -f api`, then rebuild with `docker compose up --build api`.
-- If the API starts locally but tries to connect to Postgres, set `MEMOS_STORE=memory` in `.env`.
-- If `/agent/chat` fails with `QWEN_API_KEY is required`, add a real QwenCloud key to `.env`.
-- If frontend requests fail, confirm `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000` and that FastAPI is running.
-- If Grafana logs `stat /var/lib/grafana/dashboards: no such file or directory`, rebuild with the latest compose file; it mounts `./monitoring/grafana/dashboards` into that path.
-- If npm install fails with a registry `403`, fix npm registry/auth settings and rerun `npm install` inside `frontend/`.
+- If `docker compose` reports missing variables, create the `.env` file from the template in this README.
+- If the frontend cannot reach the backend, confirm `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000` and that `curl http://localhost:8000/health` returns `{"status":"ok"}`.
+- If live chat fails with a Qwen authentication error, set `QWEN_API_KEY` and restart the API.
+- If Docker-backed Redis commands fail locally, include the password from the compose command: `redis://:ecs-2030@localhost:6379/<db>`.
+- If you do not want external services during development, use `MEMOS_STORE=json` or `MEMOS_STORE=memory` and leave `QWEN_REQUIRE_LIVE_EMBEDDINGS=false`.
+- If frontend dependencies fail to install, check npm registry/auth configuration and rerun `npm install` inside `frontend/`.
 
-## Built for Qwen Code Challenge
+## Built for Qwen Workflows
 
-MemOS-Q demonstrates QwenCloud-powered memory workflows while addressing a fundamental challenge for next-generation AI systems: **How can AI remember responsibly, transparently, and at scale?**
+MemOS-Q demonstrates how QwenCloud-backed agents can remember responsibly across sessions while keeping recall auditable, configurable, and production-ready.

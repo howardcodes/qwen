@@ -7,7 +7,52 @@ type ChatMessage = {
   content: string
 }
 
-const starterConversations = ['Memory chat', 'Study help', 'Preferences']
+type InlinePart = {
+  type: 'text' | 'strong' | 'em' | 'code'
+  text: string
+}
+
+const formatInline = (text: string): InlinePart[] => {
+  const parts: InlinePart[] = []
+  const pattern = /(\*\*([^*]+)\*\*|__([^_]+)__|`([^`]+)`|(?<!\*)\*([^*\n]+)\*(?!\*)|_([^_\n]+)_)/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) parts.push({ type: 'text', text: text.slice(lastIndex, match.index) })
+    if (match[2] || match[3]) parts.push({ type: 'strong', text: match[2] || match[3] })
+    else if (match[4]) parts.push({ type: 'code', text: match[4] })
+    else parts.push({ type: 'em', text: match[5] || match[6] })
+    lastIndex = pattern.lastIndex
+  }
+
+  if (lastIndex < text.length) parts.push({ type: 'text', text: text.slice(lastIndex) })
+  return parts.length ? parts : [{ type: 'text', text }]
+}
+
+const renderFormattedMessage = (content: string) => {
+  const lines = content.split('\n')
+  return lines.map((line, lineIndex) => {
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/)
+    const ordered = line.match(/^\s*(\d+)\.\s+(.+)$/)
+    const quote = line.match(/^\s*>\s?(.+)$/)
+    const display = unordered?.[1] ?? ordered?.[2] ?? quote?.[1] ?? line
+    const className = quote ? 'border-l-2 border-slate-300 pl-3 text-slate-600' : unordered || ordered ? 'pl-4' : undefined
+    const prefix = unordered ? '• ' : ordered ? `${ordered[1]}. ` : ''
+
+    return (
+      <p key={lineIndex} className={className || (line ? undefined : 'h-4')}>
+        {prefix}
+        {formatInline(display).map((part, partIndex) => {
+          if (part.type === 'strong') return <strong key={partIndex}>{part.text}</strong>
+          if (part.type === 'em') return <em key={partIndex}>{part.text}</em>
+          if (part.type === 'code') return <code key={partIndex} className="rounded bg-slate-100 px-1 py-0.5 text-[0.95em] text-slate-800">{part.text}</code>
+          return <span key={partIndex}>{part.text}</span>
+        })}
+      </p>
+    )
+  })
+}
 
 export default function Home() {
   const [userId, setUserId] = useState('demo-user')
@@ -56,27 +101,21 @@ export default function Home() {
   }, [loading, message, userId])
 
   return (
-    <main className="flex min-h-screen bg-[#f7f7f4] text-slate-950">
-      <aside className="hidden w-72 shrink-0 border-r border-slate-200 bg-white/70 p-4 md:block">
-        <div className="mb-6 text-lg font-bold">MemOS-Q</div>
-        <div className="space-y-2">
-          {starterConversations.map((title) => <div key={title} className="rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">{title}</div>)}
-        </div>
-      </aside>
-      <section className="flex min-h-screen flex-1 flex-col">
-        <header className="flex h-16 items-center justify-between border-b border-slate-200 bg-white/80 px-5 backdrop-blur">
-          <h1 className="text-base font-semibold">Memory-aware chat</h1>
-          <input aria-label="User ID" className="w-36 rounded-full border border-slate-200 bg-white px-3 py-2 text-sm" value={userId} onChange={(event) => setUserId(event.target.value)} />
-        </header>
+    <main className="flex min-h-screen flex-col bg-[#f7f7f4] text-slate-950">
+      <header className="sticky top-0 z-10 flex h-16 items-center justify-center border-b border-slate-200 bg-white/85 px-5 backdrop-blur">
+        <div className="absolute left-1/2 -translate-x-1/2 text-xl font-bold tracking-tight">MemOS-Q</div>
+        <input aria-label="User ID" className="ml-auto w-36 rounded-full border border-slate-200 bg-white px-3 py-2 text-sm" value={userId} onChange={(event) => setUserId(event.target.value)} />
+      </header>
+      <section className="flex min-h-[calc(100vh-4rem)] flex-1 flex-col">
         <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-4 py-8 pb-36">
           {messages.map((item, index) => (
-            <div key={index} className={item.role === 'user' ? 'ml-auto max-w-[80%] rounded-3xl bg-slate-900 px-5 py-3 text-white' : 'mr-auto max-w-[80%] rounded-3xl bg-white px-5 py-3 shadow-sm'}>
-              {item.content || (loading ? <span className="animate-pulse text-slate-400">Thinking…</span> : null)}
+            <div key={index} className={item.role === 'user' ? 'ml-auto max-w-[80%] rounded-3xl bg-slate-900 px-5 py-3 leading-relaxed text-white' : 'message-content mr-auto max-w-[80%] rounded-3xl bg-white px-5 py-3 leading-relaxed shadow-sm'}>
+              {item.content ? renderFormattedMessage(item.content) : (loading ? <span className="animate-pulse text-slate-400">Thinking…</span> : null)}
             </div>
           ))}
           {error && <p className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-900">{error}</p>}
         </div>
-        <div className="fixed bottom-0 left-0 right-0 border-t border-slate-200 bg-[#f7f7f4]/95 p-4 backdrop-blur md:left-72">
+        <div className="fixed bottom-0 left-0 right-0 border-t border-slate-200 bg-[#f7f7f4]/95 p-4 backdrop-blur">
           <div className="mx-auto flex max-w-3xl items-end gap-3 rounded-3xl border border-slate-200 bg-white p-3 shadow-lg">
             <textarea className="max-h-40 min-h-12 flex-1 resize-none border-0 bg-transparent p-2 outline-none" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} placeholder="Message MemOS-Q" />
             <Button disabled={loading || !message.trim()} onClick={submit}>{loading ? 'Typing…' : 'Send'}</Button>
