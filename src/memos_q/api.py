@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import settings
+from .daily_summary import run_daily_summary
 from .engine import MemoryOS, message_has_unresolved_references
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
@@ -88,6 +89,13 @@ class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=5000)
     query_tags: set[str] = Field(default_factory=set, max_length=20)
     limit: int = Field(default=5, ge=1, le=20)
+
+
+class DailySummarySettingsRequest(BaseModel):
+    enabled: bool = False
+    summary_time: str = Field(default="09:00", pattern=r"^\d{2}:\d{2}$")
+    timezone: str = Field(default="Asia/Singapore", min_length=1, max_length=64)
+    telegram_chat_id: str | None = Field(default=None, max_length=128)
 
 
 def authenticated_user(x_user_id: str = Header(..., min_length=1, max_length=128)) -> str:
@@ -216,6 +224,12 @@ async def qwen_agent_chat(request: AgentChatRequest, user_id: str = Depends(auth
     return {"response": response}
 
 
+@app.post("/agent/daily-summary/run")
+async def run_daily_summary_now(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    summary = await run_in_threadpool(run_daily_summary, user_id, memory_os.store, qwen_client)
+    return serialize_daily_summary(summary)
+
+
 @app.post("/ingest/vision")
 async def ingest_vision(request: VisionIngestRequest, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
     extraction = await run_in_threadpool(qwen_client.vision_extract, image_url=str(request.image_url), prompt=request.prompt)
@@ -339,12 +353,38 @@ async def maintenance(user_id: str = Depends(authenticated_user)) -> dict[str, i
     return await run_in_threadpool(memory_os.maintenance, user_id)
 
 
+@app.get("/users/me/daily-summary/settings")
+async def get_daily_summary_settings(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    return serialize_daily_summary_settings(await run_in_threadpool(memory_os.store.get_daily_summary_settings, user_id))
+
+
+@app.put("/users/me/daily-summary/settings")
+async def update_daily_summary_settings(request: DailySummarySettingsRequest, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    updated = await run_in_threadpool(
+        memory_os.store.update_daily_summary_settings,
+        user_id,
+        enabled=request.enabled,
+        summary_time=request.summary_time,
+        timezone=request.timezone,
+        telegram_chat_id=request.telegram_chat_id,
+    )
+    return serialize_daily_summary_settings(updated)
+
+
 def serialize_recall(result: Any) -> dict[str, Any]:
     return {"memory": serialize_memory(result.memory), "score": result.score, "explanation": {"source_session": result.explanation.source_session, "confidence_score": result.explanation.confidence_score, "timestamp": result.explanation.timestamp.isoformat(), "ranking_signals": result.explanation.ranking_signals, "reasoning_path": result.explanation.reasoning_path}}
 
 
 def serialize_memory(memory: Any) -> dict[str, Any]:
     return {"id": memory.id, "user_id": memory.user_id, "content": memory.content, "memory_type": memory.memory_type.value, "scope": memory.scope.value, "status": memory.status.value, "source": memory.source.value, "expires_at": memory.expires_at.isoformat() if memory.expires_at else None, "source_session": memory.source_session, "confidence_score": memory.confidence_score, "confidence_reasons": memory.confidence_reasons, "importance_score": memory.importance_score, "novelty_score": memory.novelty_score, "stability_score": memory.stability_score, "sensitivity": memory.sensitivity, "approved_at": memory.approved_at.isoformat() if memory.approved_at else None, "last_seen_at": memory.last_seen_at.isoformat() if memory.last_seen_at else None, "conflicting_memory_id": memory.conflicting_memory_id, "conflict_reason": memory.conflict_reason, "version": memory.version, "tags": sorted(memory.tags), "created_at": memory.created_at.isoformat(), "updated_at": memory.updated_at.isoformat()}
+
+
+def serialize_daily_summary(summary: Any) -> dict[str, Any]:
+    return {"id": summary.id, "user_id": summary.user_id, "summary_text": summary.summary_text, "sent_to_telegram": summary.sent_to_telegram, "sent_at": summary.sent_at.isoformat() if summary.sent_at else None, "created_at": summary.created_at.isoformat(), "error_message": summary.error_message}
+
+
+def serialize_daily_summary_settings(config: Any) -> dict[str, Any]:
+    return {"user_id": config.user_id, "enabled": config.enabled, "summary_time": config.summary_time, "timezone": config.timezone, "telegram_chat_id": config.telegram_chat_id, "updated_at": config.updated_at.isoformat()}
 
 
 SYSTEM_PROMPT_CONTRACT = """Use recent conversation for follow-ups. Use long-term memory only for stable user facts/preferences. Never mention lack of saved memory when recent conversation contains enough context. Do not introduce unrelated memories unless directly relevant. Priority order: current message, recent conversation turns, active session state, relevant long-term memories, general knowledge. If a reference remains ambiguous after recent turns and session state, ask one concise clarification question without mentioning memory storage."""

@@ -106,6 +106,31 @@ class UserProfile:
 
 
 @dataclass(slots=True)
+class DailySummarySettings:
+    """Per-user controls for proactive Telegram daily summaries."""
+
+    user_id: str
+    enabled: bool = False
+    summary_time: str = "09:00"
+    timezone: str = "Asia/Singapore"
+    telegram_chat_id: str | None = None
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class DailySummary:
+    """Persisted record of one generated daily summary delivery attempt."""
+
+    user_id: str
+    summary_text: str = ""
+    sent_to_telegram: bool = False
+    sent_at: datetime | None = None
+    error_message: str | None = None
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class MemoryStreamEntry:
     """Raw memory stream event retained in Postgres/source-of-truth storage."""
 

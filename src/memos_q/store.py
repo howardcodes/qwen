@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .models import AuditEvent, ChatTurn, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
+from .models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
 from .scoring import cosine_similarity
 
 T = TypeVar("T")
@@ -62,12 +62,36 @@ class InMemoryStore:
         self._stream_by_user: dict[str, set[str]] = defaultdict(set)
         self._by_user: dict[str, set[str]] = defaultdict(set)
         self._profiles: dict[str, UserProfile] = {}
+        self._daily_summary_settings: dict[str, DailySummarySettings] = {}
+        self._daily_summaries: dict[str, DailySummary] = {}
         self._conversation_turns: dict[tuple[str, str], list[ChatTurn]] = defaultdict(list)
         self._session_state: dict[tuple[str, str], SessionState] = {}
 
 
     def get_user_profile(self, user_id: str) -> UserProfile | None:
         return self._profiles.get(user_id)
+
+    def get_daily_summary_settings(self, user_id: str) -> DailySummarySettings:
+        return self._daily_summary_settings.get(user_id, DailySummarySettings(user_id=user_id))
+
+    def update_daily_summary_settings(self, user_id: str, **changes: object) -> DailySummarySettings:
+        settings = self.get_daily_summary_settings(user_id)
+        previous = _dataclass_payload(settings) if user_id in self._daily_summary_settings else None
+        for key, value in changes.items():
+            if hasattr(settings, key):
+                setattr(settings, key, value)
+        settings.updated_at = utc_now()
+        self._daily_summary_settings[user_id] = settings
+        self.record_audit("daily_summary_settings_update", "user", user_id, previous, _dataclass_payload(settings))
+        return settings
+
+    def add_daily_summary(self, summary: DailySummary) -> DailySummary:
+        self._daily_summaries[summary.id] = summary
+        self.record_audit("daily_summary_create", "daily-summary-agent", summary.user_id, None, _dataclass_payload(summary))
+        return summary
+
+    def list_daily_summaries(self, user_id: str) -> list[DailySummary]:
+        return sorted([item for item in self._daily_summaries.values() if item.user_id == user_id], key=lambda item: item.created_at)
 
     def append_conversation_turn(self, user_id: str, conversation_id: str, turn: ChatTurn, *, max_turns: int = 50) -> None:
         key = (user_id, conversation_id)
@@ -77,6 +101,14 @@ class InMemoryStore:
 
     def recent_conversation_turns(self, user_id: str, conversation_id: str, *, limit: int = 10) -> list[ChatTurn]:
         return self._conversation_turns[(user_id, conversation_id)][-limit:]
+
+    def recent_conversation_activity(self, user_id: str, *, since: datetime, limit: int = 80) -> list[dict[str, str]]:
+        items = [
+            {"role": str(event.new_value.get("role", "user")), "content": str(event.new_value.get("content", ""))}
+            for event in self._audit_log
+            if event.action == "conversation_turn_append" and event.timestamp >= since and event.new_value
+        ]
+        return items[-limit:]
 
     def get_session_state(self, user_id: str, conversation_id: str) -> SessionState:
         return self._session_state.get((user_id, conversation_id), SessionState())
@@ -224,7 +256,7 @@ class InMemoryStore:
     def list_user_ids(self) -> list[str]:
         """Return user ids with at least one memory."""
 
-        return sorted(self._by_user)
+        return sorted(set(self._by_user) | set(self._daily_summary_settings))
 
     def audit_log(self, memory_id: str | None = None) -> list[AuditEvent]:
         if memory_id is None:
@@ -283,6 +315,12 @@ class JsonFileMemoryStore(InMemoryStore):
             for item in payload.get("profiles", []):
                 profile = _load_model(UserProfile, item)
                 self._profiles[profile.user_id] = profile
+            for item in payload.get("daily_summary_settings", []):
+                config = _load_model(DailySummarySettings, item)
+                self._daily_summary_settings[config.user_id] = config
+            for item in payload.get("daily_summaries", []):
+                summary = _load_model(DailySummary, item)
+                self._daily_summaries[summary.id] = summary
             for item in payload.get("conversation_turns", []):
                 key = (item["user_id"], item["conversation_id"])
                 self._conversation_turns[key] = [_load_model(ChatTurn, turn) for turn in item.get("turns", [])]
@@ -307,6 +345,8 @@ class JsonFileMemoryStore(InMemoryStore):
             "memories": [_dataclass_payload(item) for item in self._memories.values()],
             "stream": [_dataclass_payload(item) for item in self._stream.values()],
             "profiles": [_dataclass_payload(item) for item in self._profiles.values()],
+            "daily_summary_settings": [_dataclass_payload(item) for item in self._daily_summary_settings.values()],
+            "daily_summaries": [_dataclass_payload(item) for item in self._daily_summaries.values()],
             "conversation_turns": [
                 {"user_id": user_id, "conversation_id": conversation_id, "turns": [_dataclass_payload(turn) for turn in turns]}
                 for (user_id, conversation_id), turns in self._conversation_turns.items()

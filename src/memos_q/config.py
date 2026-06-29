@@ -49,6 +49,9 @@ _DEFAULTS = {
     "qwen_memory_extraction_max_tokens": "500",
     "qwen_conflict_resolution_max_tokens": "300",
     "qwen_summary_max_tokens": "400",
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "daily_summary_timezone": "Asia/Singapore",
     "memory_recall_top_k": "5",
     "memory_recall_vector_top_k": "10",
     "memory_recall_fallback_limit": "20",
@@ -95,6 +98,9 @@ class Settings:
     qwen_memory_extraction_max_tokens: int = 500
     qwen_conflict_resolution_max_tokens: int = 300
     qwen_summary_max_tokens: int = 400
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    daily_summary_timezone: str = "Asia/Singapore"
     memory_recall_top_k: int = 5
     memory_recall_vector_top_k: int = 10
     memory_recall_fallback_limit: int = 20
@@ -149,6 +155,9 @@ class Settings:
             qwen_memory_extraction_max_tokens=int(os.getenv("QWEN_MEMORY_EXTRACTION_MAX_TOKENS", _DEFAULTS["qwen_memory_extraction_max_tokens"])),
             qwen_conflict_resolution_max_tokens=int(os.getenv("QWEN_CONFLICT_RESOLUTION_MAX_TOKENS", _DEFAULTS["qwen_conflict_resolution_max_tokens"])),
             qwen_summary_max_tokens=int(os.getenv("QWEN_SUMMARY_MAX_TOKENS", _DEFAULTS["qwen_summary_max_tokens"])),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", _DEFAULTS["telegram_bot_token"]),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", _DEFAULTS["telegram_chat_id"]),
+            daily_summary_timezone=os.getenv("DAILY_SUMMARY_TIMEZONE", _DEFAULTS["daily_summary_timezone"]),
             memory_recall_top_k=int(os.getenv("MEMORY_RECALL_TOP_K", _DEFAULTS["memory_recall_top_k"])),
             memory_recall_vector_top_k=int(os.getenv("MEMORY_RECALL_VECTOR_TOP_K", _DEFAULTS["memory_recall_vector_top_k"])),
             memory_recall_fallback_limit=int(os.getenv("MEMORY_RECALL_FALLBACK_LIMIT", _DEFAULTS["memory_recall_fallback_limit"])),

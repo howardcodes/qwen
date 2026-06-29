@@ -142,3 +142,34 @@ export async function archiveMemory(userId: string, memoryId: string) {
   if (!response.ok) throw new Error(await response.text())
   return response.json()
 }
+
+export type DailySummarySettings = {
+  user_id: string
+  enabled: boolean
+  summary_time: string
+  timezone: string
+  telegram_chat_id?: string | null
+  updated_at: string
+}
+
+export async function getDailySummarySettings(userId: string): Promise<DailySummarySettings> {
+  const response = await fetch(`${API_BASE_URL}/users/me/daily-summary/settings`, { headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
+
+export async function updateDailySummarySettings(userId: string, settings: Pick<DailySummarySettings, 'enabled' | 'summary_time' | 'timezone' | 'telegram_chat_id'>): Promise<DailySummarySettings> {
+  const response = await fetch(`${API_BASE_URL}/users/me/daily-summary/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
+    body: JSON.stringify(settings)
+  })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
+
+export async function runDailySummary(userId: string) {
+  const response = await fetch(`${API_BASE_URL}/agent/daily-summary/run`, { method: 'POST', headers: { 'x-user-id': userId } })
+  if (!response.ok) throw new Error(await response.text())
+  return response.json()
+}
