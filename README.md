@@ -1,6 +1,196 @@
-# MemOS-Q
+# MemOS-Q: A Persistent-Memory AI Agent Powered by a Self-Evolving Memory Operating System
 
-MemOS-Q is a Qwen-powered memory operating system for AI agents. It pairs a focused Next.js chat UI with a FastAPI backend that can persist memories, recall relevant context, stream Qwen responses, ingest multimodal inputs, run background maintenance, and expose production observability.
+### Track 1: MemoryAgent
+
+MemOS-Q is submitted under **Track 1: MemoryAgent**, focusing on building AI agents with persistent memory that autonomously accumulate experience, remember user preferences, and improve decision-making across multi-turn and cross-session interactions.
+
+---
+
+# Overview
+
+We built **MemOS-Q**, a persistent-memory AI agent powered by a self-evolving memory operating system. The agent autonomously accumulates experience, learns user preferences across sessions, selectively recalls important memories, and forgets outdated information to improve decision-making over time.
+
+Unlike traditional AI assistants that lose context after each conversation, MemOS-Q provides a persistent memory architecture that allows agents to maintain long-term relationships with users while operating within limited context windows.
+
+MemOS-Q transforms stateless Large Language Models into continuously learning agents by combining:
+
+* Persistent cross-session memory
+* Autonomous experience accumulation
+* User preference learning
+* Intelligent memory retrieval
+* Timely forgetting and memory evolution
+* Explainable memory recall
+* Multimodal memory ingestion
+* Production-grade observability
+
+The platform pairs a focused Next.js chat interface with a FastAPI backend that persists memories, recalls relevant context, streams Qwen responses, ingests multimodal inputs, performs background memory maintenance, and exposes production observability tooling.
+
+---
+
+# Key Features
+
+## 🧠 Persistent Cross-Session Memory
+
+MemOS-Q stores and retrieves memories across conversations and sessions, enabling long-term continuity and personalization.
+
+Examples include:
+
+* User preferences
+* Historical interactions
+* Long-term goals
+* Personal profiles
+* Behavioral patterns
+* Session summaries
+
+---
+
+## 🔄 Autonomous Experience Accumulation
+
+The agent automatically extracts and stores important information from interactions without requiring manual intervention.
+
+Examples include:
+
+* Travel plans
+* Work preferences
+* Educational background
+* Frequently discussed topics
+* User habits and routines
+
+---
+
+## 🎯 Intelligent Memory Recall
+
+MemOS-Q retrieves only the most contextually relevant memories through semantic search and ranking.
+
+Features include:
+
+* Vector similarity search
+* Hybrid retrieval
+* Relevance scoring
+* Explainable recall
+* Context-window optimization
+
+---
+
+## 🗑️ Timely Forgetting
+
+To prevent memory pollution and stale information accumulation, MemOS-Q continuously evaluates memories and removes outdated or low-value information.
+
+The forgetting system supports:
+
+* Time decay
+* Importance scoring
+* Duplicate removal
+* Conflict resolution
+* Memory compaction
+* Summarization
+
+---
+
+## 👤 User Preference Learning
+
+The agent continuously builds and updates user profiles through interaction history.
+
+Examples include:
+
+* Communication styles
+* Travel preferences
+* Personal interests
+* Food preferences
+* Frequently visited locations
+* Behavioral tendencies
+
+---
+
+## 🧩 Memory Evolution
+
+Memories are continuously maintained through:
+
+* Summarization
+* Consolidation
+* Conflict resolution
+* Memory merging
+* Profile updates
+* Knowledge refinement
+
+---
+
+## 👁️ Explainable Memory Recall
+
+Every retrieved memory contains metadata explaining:
+
+* Why it was recalled
+* Relevance score
+* Confidence level
+* Source information
+* Ranking position
+
+---
+
+## 🖼️ Multimodal Memory Ingestion
+
+MemOS-Q supports memory extraction from:
+
+* Text conversations
+* Images
+* Documents
+* Visual understanding through Qwen-VL
+
+---
+
+## 📊 Production Observability
+
+The platform includes enterprise-grade monitoring through:
+
+* Langfuse tracing
+* Prometheus metrics
+* Grafana dashboards
+* OpenTelemetry instrumentation
+* Health monitoring
+* Performance analytics
+
+---
+
+# Demonstrating Persistent Memory
+
+### Session 1
+
+User:
+
+> "I'm going to North Carolina for exchange next semester."
+
+MemOS-Q autonomously extracts and stores:
+
+* Location: North Carolina
+* Event: Student exchange
+* Temporal context
+* User profile update
+
+---
+
+### Session 8
+
+User:
+
+> "What nearby cities should I visit?"
+
+Traditional LLM:
+
+> "Which city are you staying in?"
+
+MemOS-Q:
+
+> "Since you'll be staying in North Carolina for your exchange, you may enjoy Asheville, Charleston, and the Blue Ridge Parkway for weekend trips."
+
+This demonstrates:
+
+* ✅ Persistent memory
+* ✅ Cross-session recall
+* ✅ User preference learning
+* ✅ Experience accumulation
+* ✅ Improved decision-making
+
+---
 
 ## Current Project Snapshot
 
