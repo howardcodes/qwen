@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '../components/ui/button'
-import { streamAgentMessage } from '../lib/api'
+import { getDailySummarySettings, runDailySummary, streamAgentMessage, updateDailySummarySettings } from '../lib/api'
 
 type ChatMessage = {
   role: 'user' | 'assistant'
@@ -62,6 +62,11 @@ export default function Home() {
   ])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [summaryEnabled, setSummaryEnabled] = useState(false)
+  const [summaryTime, setSummaryTime] = useState('09:00')
+  const [summaryTimezone, setSummaryTimezone] = useState('Asia/Singapore')
+  const [telegramChatId, setTelegramChatId] = useState('')
+  const [settingsStatus, setSettingsStatus] = useState('')
   const activeStream = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -71,6 +76,37 @@ export default function Home() {
 
   useEffect(() => {
     window.localStorage.setItem('memos-q-user-id', userId)
+  }, [userId])
+
+  useEffect(() => {
+    getDailySummarySettings(userId)
+      .then((settings) => {
+        setSummaryEnabled(settings.enabled)
+        setSummaryTime(settings.summary_time)
+        setSummaryTimezone(settings.timezone)
+        setTelegramChatId(settings.telegram_chat_id || '')
+      })
+      .catch(() => undefined)
+  }, [userId])
+
+  const saveSummarySettings = useCallback(async () => {
+    setSettingsStatus('Saving…')
+    try {
+      await updateDailySummarySettings(userId, { enabled: summaryEnabled, summary_time: summaryTime, timezone: summaryTimezone, telegram_chat_id: telegramChatId || null })
+      setSettingsStatus('Saved')
+    } catch (err) {
+      setSettingsStatus(String(err))
+    }
+  }, [summaryEnabled, summaryTime, summaryTimezone, telegramChatId, userId])
+
+  const triggerDailySummary = useCallback(async () => {
+    setSettingsStatus('Generating summary…')
+    try {
+      const result = await runDailySummary(userId)
+      setSettingsStatus(result.sent_to_telegram ? 'Summary sent to Telegram' : (result.error_message || 'Summary generated but not sent'))
+    } catch (err) {
+      setSettingsStatus(String(err))
+    }
   }, [userId])
 
   const submit = useCallback(async () => {
@@ -113,6 +149,28 @@ export default function Home() {
               {item.content ? renderFormattedMessage(item.content) : (loading ? <span className="animate-pulse text-slate-400">Thinking…</span> : null)}
             </div>
           ))}
+          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-semibold">Daily Telegram Summary</h2>
+                <p className="text-sm text-slate-600">Get a proactive 9 AM reflection with topics, memories, and follow-ups.</p>
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={summaryEnabled} onChange={(event) => setSummaryEnabled(event.target.checked)} />
+                Enable
+              </label>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <input aria-label="Summary time" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" value={summaryTime} onChange={(event) => setSummaryTime(event.target.value)} placeholder="09:00" />
+              <input aria-label="Summary timezone" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" value={summaryTimezone} onChange={(event) => setSummaryTimezone(event.target.value)} placeholder="Asia/Singapore" />
+              <input aria-label="Telegram chat ID" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" value={telegramChatId} onChange={(event) => setTelegramChatId(event.target.value)} placeholder="Telegram chat ID" />
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <Button onClick={saveSummarySettings}>Save summary settings</Button>
+              <Button onClick={triggerDailySummary}>Run now</Button>
+              {settingsStatus && <span className="text-sm text-slate-600">{settingsStatus}</span>}
+            </div>
+          </div>
           {error && <p className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-900">{error}</p>}
         </div>
         <div className="fixed bottom-0 left-0 right-0 border-t border-slate-200 bg-[#f7f7f4]/95 p-4 backdrop-blur">

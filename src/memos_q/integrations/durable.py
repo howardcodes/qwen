@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, ChatTurn, Memory, UserProfile, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
+from memos_q.models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
 from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot, session_state_snapshot
 
 
@@ -138,6 +138,27 @@ class PostgresMemoryStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS daily_summary_settings (
+                    user_id TEXT PRIMARY KEY,
+                    enabled BOOLEAN NOT NULL DEFAULT false,
+                    summary_time TEXT NOT NULL DEFAULT '09:00',
+                    timezone TEXT NOT NULL DEFAULT 'Asia/Singapore',
+                    telegram_chat_id TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE TABLE IF NOT EXISTS daily_summaries (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    sent_to_telegram BOOLEAN NOT NULL DEFAULT false,
+                    sent_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    error_message TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS conversation_turns (
                     id BIGSERIAL PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -167,6 +188,7 @@ class PostgresMemoryStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_state_user_conversation ON session_state(user_id, conversation_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_created ON memory_stream(user_id, created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_status ON memory_stream(user_id, status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_summaries_user_created ON daily_summaries(user_id, created_at DESC)")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'low'")
@@ -220,6 +242,57 @@ class PostgresMemoryStore:
                 (user_id, conversation_id, limit),
             )
             return [ChatTurn(role=row[0], content=row[1]) for row in cursor.fetchall()]
+
+    def recent_conversation_activity(self, user_id: str, *, since, limit: int = 80) -> list[dict[str, str]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT role, content FROM conversation_turns
+                WHERE user_id = %s AND created_at >= %s
+                ORDER BY created_at DESC, id DESC LIMIT %s
+                """,
+                (user_id, since, limit),
+            )
+            rows = cursor.fetchall()
+        return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
+
+    def get_daily_summary_settings(self, user_id: str) -> DailySummarySettings:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT user_id, enabled, summary_time, timezone, telegram_chat_id, updated_at FROM daily_summary_settings WHERE user_id = %s", (user_id,))
+            row = cursor.fetchone()
+        if not row:
+            return DailySummarySettings(user_id=user_id)
+        return DailySummarySettings(user_id=row[0], enabled=row[1], summary_time=row[2], timezone=row[3], telegram_chat_id=row[4], updated_at=row[5])
+
+    def update_daily_summary_settings(self, user_id: str, **changes: object) -> DailySummarySettings:
+        current = self.get_daily_summary_settings(user_id)
+        for key, value in changes.items():
+            if hasattr(current, key):
+                setattr(current, key, value)
+        current.updated_at = utc_now()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO daily_summary_settings (user_id, enabled, summary_time, timezone, telegram_chat_id, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET enabled = EXCLUDED.enabled, summary_time = EXCLUDED.summary_time,
+                    timezone = EXCLUDED.timezone, telegram_chat_id = EXCLUDED.telegram_chat_id, updated_at = EXCLUDED.updated_at
+                """,
+                (current.user_id, current.enabled, current.summary_time, current.timezone, current.telegram_chat_id, current.updated_at),
+            )
+            self._record_audit(cursor, "daily_summary_settings_update", "user", user_id, None, {"enabled": current.enabled, "summary_time": current.summary_time, "timezone": current.timezone, "telegram_chat_id": current.telegram_chat_id})
+        self.connection.commit()
+        return current
+
+    def add_daily_summary(self, summary: DailySummary) -> DailySummary:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO daily_summaries (id, user_id, summary_text, sent_to_telegram, sent_at, created_at, error_message) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (summary.id, summary.user_id, summary.summary_text, summary.sent_to_telegram, summary.sent_at, summary.created_at, summary.error_message),
+            )
+            self._record_audit(cursor, "daily_summary_create", "daily-summary-agent", summary.user_id, None, {"summary_id": summary.id, "sent_to_telegram": summary.sent_to_telegram, "error_message": summary.error_message})
+        self.connection.commit()
+        return summary
 
     def get_session_state(self, user_id: str, conversation_id: str) -> SessionState:
         with self.connection.cursor() as cursor:
@@ -529,7 +602,7 @@ class PostgresMemoryStore:
         """Load ids for users that have memory records."""
 
         with self.connection.cursor() as cursor:
-            cursor.execute("SELECT DISTINCT user_id FROM memories ORDER BY user_id")
+            cursor.execute("SELECT user_id FROM memories UNION SELECT user_id FROM daily_summary_settings ORDER BY user_id")
             return [row[0] for row in cursor.fetchall()]
 
     def audit_log(self, memory_id: str | None = None) -> list[AuditEvent]:

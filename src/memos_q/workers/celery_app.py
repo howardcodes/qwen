@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
 
 from memos_q.config import settings
+from memos_q.daily_summary import run_daily_summary
 from memos_q.engine import MemoryCandidate, MemoryOS
 from memos_q.integrations.factory import build_memory_store
 from memos_q.integrations.qwen_cloud import QwenCloudClient, QwenMessage
@@ -20,7 +22,7 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
-    timezone="UTC",
+    timezone=settings.daily_summary_timezone,
     task_acks_late=True,
     task_default_retry_delay=60,
     task_routes={"memos_q.workers.celery_app.*": {"queue": "memory-maintenance"}},
@@ -32,6 +34,10 @@ celery_app.conf.update(
         "nightly-memory-compaction": {
             "task": "memos_q.workers.celery_app.compact_all_active_users",
             "schedule": 60 * 60 * 24,
+        },
+        "daily-telegram-summary": {
+            "task": "memos_q.workers.celery_app.send_daily_summaries",
+            "schedule": crontab(hour=9, minute=0),
         }
     },
 )
@@ -67,6 +73,26 @@ def compact_user_memories(self, user_id: str) -> dict[str, int]:
     report = _memory_os.maintenance(user_id)
     _memory_os.store.record_audit("job_success", "celery-maintenance", user_id, None, {"task_id": self.request.id, "report": report})
     return report
+
+
+@celery_app.task(name="memos_q.workers.celery_app.send_daily_summaries")
+def send_daily_summaries() -> dict[str, str]:
+    """Queue proactive Telegram summaries for users who enabled them."""
+
+    task_ids = {}
+    for user_id in _memory_os.store.list_user_ids():
+        config = _memory_os.store.get_daily_summary_settings(user_id) if hasattr(_memory_os.store, "get_daily_summary_settings") else None
+        if config and config.enabled:
+            task_ids[user_id] = send_daily_summary_for_user.delay(user_id).id
+    return task_ids
+
+
+@celery_app.task(name="memos_q.workers.celery_app.send_daily_summary_for_user")
+def send_daily_summary_for_user(user_id: str) -> dict[str, object]:
+    """Generate, persist, and send one user's Telegram daily summary."""
+
+    summary = run_daily_summary(user_id, _memory_os.store, _qwen, force_send=False)
+    return {"summary_id": summary.id, "sent_to_telegram": summary.sent_to_telegram, "error_message": summary.error_message}
 
 
 @celery_app.task(name="memos_q.workers.celery_app.summarize_session")
