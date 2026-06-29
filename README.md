@@ -15,6 +15,10 @@ MemOS-Q is a Qwen-powered memory operating system for AI agents. It pairs a focu
 | Observability | Prometheus `/metrics`, optional OpenTelemetry FastAPI instrumentation, Langfuse tracing hooks, Prometheus config, Grafana provisioning, and an OpenTelemetry Collector config. |
 | Deployment | Dockerfiles for API, worker, and frontend plus `docker-compose.yml` for API, worker, frontend, PostgreSQL/pgvector, Redis, MinIO, Prometheus, Grafana, and OTel Collector. |
 
+## Architecture Diagram
+
+![Architecture Diagram](public/Architecture%20Diagram.png)
+
 ## Repository Layout
 
 ```text
@@ -250,3 +254,7 @@ npm run build
 ## Built for Qwen Workflows
 
 MemOS-Q demonstrates how QwenCloud-backed agents can remember responsibly across sessions while keeping recall auditable, configurable, and production-ready.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
