@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
-from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot, session_state_snapshot
+from memos_q.models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, TaskRecord, TaskRecordStatus, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
+from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot, session_state_snapshot, task_record_snapshot
 
 
 class PostgresMemoryStore:
@@ -159,6 +159,26 @@ class PostgresMemoryStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS task_records (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    blocker_type TEXT NOT NULL DEFAULT 'none',
+                    blocker TEXT,
+                    next_action TEXT,
+                    evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.75,
+                    source TEXT NOT NULL DEFAULT 'daily_briefing',
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    UNIQUE (user_id, title)
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS conversation_turns (
                     id BIGSERIAL PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -184,6 +204,7 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_records_user_status_updated ON task_records(user_id, status, updated_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversation_turns_user_conversation_created ON conversation_turns(user_id, conversation_id, created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_state_user_conversation ON session_state(user_id, conversation_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_created ON memory_stream(user_id, created_at)")
@@ -293,6 +314,40 @@ class PostgresMemoryStore:
             self._record_audit(cursor, "daily_summary_create", "daily-summary-agent", summary.user_id, None, {"summary_id": summary.id, "sent_to_telegram": summary.sent_to_telegram, "error_message": summary.error_message})
         self.connection.commit()
         return summary
+
+    def upsert_task_record(self, task: TaskRecord, *, actor: str = "daily-briefing-agent") -> TaskRecord:
+        task.updated_at = utc_now()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO task_records (id, user_id, title, status, blocker_type, blocker, next_action, evidence, confidence, source, metadata, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, title) DO UPDATE SET
+                    status = EXCLUDED.status, blocker_type = EXCLUDED.blocker_type, blocker = EXCLUDED.blocker,
+                    next_action = EXCLUDED.next_action, evidence = EXCLUDED.evidence, confidence = EXCLUDED.confidence,
+                    source = EXCLUDED.source, metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at
+                RETURNING id, created_at
+                """,
+                (task.id, task.user_id, task.title, task.status.value, task.blocker_type, task.blocker, task.next_action, json.dumps(task.evidence), task.confidence, task.source, json.dumps(task.metadata), task.created_at, task.updated_at),
+            )
+            row = cursor.fetchone()
+            if row:
+                task.id, task.created_at = row[0], row[1]
+            self._record_audit(cursor, "task_record_upsert", actor, task.id, None, task_record_snapshot(task))
+        self.connection.commit()
+        return task
+
+    def list_task_records(self, user_id: str, *, include_closed: bool = False) -> list[TaskRecord]:
+        status_clause = "" if include_closed else "AND status NOT IN ('done', 'dropped')"
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT id, user_id, title, status, blocker_type, blocker, next_action, evidence, confidence, source, metadata, created_at, updated_at
+                FROM task_records WHERE user_id = %s {status_clause} ORDER BY updated_at DESC
+                """,
+                (user_id,),
+            )
+            return [task_record_from_row(row) for row in cursor.fetchall()]
 
     def get_session_state(self, user_id: str, conversation_id: str) -> SessionState:
         with self.connection.cursor() as cursor:
@@ -912,6 +967,15 @@ class S3ObjectStore:
             ContentType=content_type,
         )
         return f"{self.config.s3_endpoint_url.rstrip('/')}/{self.config.s3_bucket}/{key}"
+
+
+def task_record_from_row(row: Iterable[Any]) -> TaskRecord:
+    task_id, user_id, title, status, blocker_type, blocker, next_action, evidence, confidence, source, metadata, created_at, updated_at = row
+    if isinstance(evidence, str):
+        evidence = json.loads(evidence)
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return TaskRecord(id=task_id, user_id=user_id, title=title, status=TaskRecordStatus(status), blocker_type=blocker_type or "none", blocker=blocker, next_action=next_action, evidence=list(evidence or []), confidence=confidence, source=source or "daily_briefing", metadata=dict(metadata or {}), created_at=created_at, updated_at=updated_at)
 
 
 def memory_from_row(row: Iterable[Any]) -> Memory:

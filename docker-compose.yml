@@ -37,6 +37,21 @@ services:
       postgres:
         condition: service_healthy
 
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    restart: unless-stopped
+    command: ["celery", "-A", "memos_q.workers.celery_app.celery_app", "beat", "--loglevel=INFO"]
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend

@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
+from .models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, TaskRecord, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
 from .scoring import cosine_similarity
 
 T = TypeVar("T")
@@ -66,6 +66,40 @@ class InMemoryStore:
         self._daily_summaries: dict[str, DailySummary] = {}
         self._conversation_turns: dict[tuple[str, str], list[ChatTurn]] = defaultdict(list)
         self._session_state: dict[tuple[str, str], SessionState] = {}
+        self._task_records: dict[str, TaskRecord] = {}
+        self._task_records_by_user: dict[str, set[str]] = defaultdict(set)
+
+    def upsert_task_record(self, task: TaskRecord, *, actor: str = "daily-briefing-agent") -> TaskRecord:
+        existing = None
+        normalized_title = task.title.strip().lower()
+        for task_id in self._task_records_by_user[task.user_id]:
+            candidate = self._task_records[task_id]
+            if candidate.title.strip().lower() == normalized_title:
+                existing = candidate
+                break
+        if existing:
+            previous = task_record_snapshot(existing)
+            existing.status = task.status
+            existing.blocker_type = task.blocker_type
+            existing.blocker = task.blocker
+            existing.next_action = task.next_action
+            existing.evidence = task.evidence
+            existing.confidence = task.confidence
+            existing.source = task.source
+            existing.metadata = task.metadata
+            existing.updated_at = utc_now()
+            self.record_audit("task_record_update", actor, existing.id, previous, task_record_snapshot(existing))
+            return existing
+        self._task_records[task.id] = task
+        self._task_records_by_user[task.user_id].add(task.id)
+        self.record_audit("task_record_create", actor, task.id, None, task_record_snapshot(task))
+        return task
+
+    def list_task_records(self, user_id: str, *, include_closed: bool = False) -> list[TaskRecord]:
+        tasks = [self._task_records[task_id] for task_id in self._task_records_by_user[user_id]]
+        if not include_closed:
+            tasks = [task for task in tasks if str(task.status) not in {"done", "dropped"}]
+        return sorted(tasks, key=lambda item: item.updated_at, reverse=True)
 
 
     def get_user_profile(self, user_id: str) -> UserProfile | None:
@@ -321,6 +355,10 @@ class JsonFileMemoryStore(InMemoryStore):
             for item in payload.get("daily_summaries", []):
                 summary = _load_model(DailySummary, item)
                 self._daily_summaries[summary.id] = summary
+            for item in payload.get("task_records", []):
+                task = _load_model(TaskRecord, item)
+                self._task_records[task.id] = task
+                self._task_records_by_user[task.user_id].add(task.id)
             for item in payload.get("conversation_turns", []):
                 key = (item["user_id"], item["conversation_id"])
                 self._conversation_turns[key] = [_load_model(ChatTurn, turn) for turn in item.get("turns", [])]
@@ -347,6 +385,7 @@ class JsonFileMemoryStore(InMemoryStore):
             "profiles": [_dataclass_payload(item) for item in self._profiles.values()],
             "daily_summary_settings": [_dataclass_payload(item) for item in self._daily_summary_settings.values()],
             "daily_summaries": [_dataclass_payload(item) for item in self._daily_summaries.values()],
+            "task_records": [_dataclass_payload(item) for item in self._task_records.values()],
             "conversation_turns": [
                 {"user_id": user_id, "conversation_id": conversation_id, "turns": [_dataclass_payload(turn) for turn in turns]}
                 for (user_id, conversation_id), turns in self._conversation_turns.items()
@@ -366,6 +405,24 @@ class JsonFileMemoryStore(InMemoryStore):
     def record_audit(self, *args: Any, **kwargs: Any) -> None:
         super().record_audit(*args, **kwargs)
         self._persist()
+
+
+def task_record_snapshot(task: TaskRecord) -> dict[str, object]:
+    return {
+        "id": task.id,
+        "user_id": task.user_id,
+        "title": task.title,
+        "status": task.status.value,
+        "blocker_type": task.blocker_type,
+        "blocker": task.blocker,
+        "next_action": task.next_action,
+        "evidence": list(task.evidence),
+        "confidence": task.confidence,
+        "source": task.source,
+        "metadata": dict(task.metadata),
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat(),
+    }
 
 
 def memory_snapshot(memory: Memory) -> dict[str, object]:

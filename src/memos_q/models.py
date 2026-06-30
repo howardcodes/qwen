@@ -61,6 +61,14 @@ class MemorySource(StrEnum):
     RAW_CHAT_LOG = "raw_chat_log"
 
 
+class TaskRecordStatus(StrEnum):
+    OPEN = "open"
+    BLOCKED = "blocked"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    DROPPED = "dropped"
+
+
 class MemoryType(StrEnum):
     """Supported memory layers and durable production categories."""
 
@@ -128,6 +136,29 @@ class DailySummary:
     error_message: str | None = None
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class TaskRecord:
+    """Durable user goal/task state extracted by the daily briefing agent."""
+
+    user_id: str
+    title: str
+    status: TaskRecordStatus | str = TaskRecordStatus.OPEN
+    blocker_type: str = "none"
+    blocker: str | None = None
+    next_action: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    confidence: float = 0.75
+    source: str = "daily_briefing"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        self.status = TaskRecordStatus(self.status)
+        self.confidence = clamp_score(self.confidence)
 
 
 @dataclass(slots=True)
