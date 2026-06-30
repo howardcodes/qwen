@@ -5,7 +5,13 @@ from memos_q.telegram import TelegramClient, truncate_telegram_message
 
 
 class FakeQwen:
+    def __init__(self):
+        self.calls = 0
+
     def chat(self, messages, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return '[{"title":"Review Telegram settings","status":"open","blocker_type":"none","blocker":null,"next_action":"Review Telegram settings","evidence":["Telegram daily summaries sound useful."],"confidence":0.8}]'
         return "Topics\n- Qwen planning\n- Qwen planning\nNext\n- Review Telegram settings"
 
 
@@ -70,3 +76,16 @@ def test_empty_summary_is_not_sent_or_marked_sent():
 
 def test_truncate_telegram_message_keeps_limit():
     assert len(truncate_telegram_message("x" * 5000)) <= 4096
+
+
+def test_daily_briefing_extracts_and_persists_task_records():
+    store = InMemoryStore()
+    store.append_conversation_turn("u1", "c1", ChatTurn("user", "I need to finish the release plan but I am waiting on API credentials."))
+
+    summary = generate_daily_summary_text("u1", store, FakeQwen())
+
+    tasks = store.list_task_records("u1")
+    assert len(tasks) == 1
+    assert tasks[0].title == "Review Telegram settings"
+    assert tasks[0].next_action == "Review Telegram settings"
+    assert "Review Telegram settings" in summary
