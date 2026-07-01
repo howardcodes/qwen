@@ -16,8 +16,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AnyUrl, BaseModel, Field
 
 from .config import settings
-from .daily_summary import run_daily_summary
-from .engine import MemoryOS, message_has_unresolved_references
+from .daily_summary import extract_and_persist_task_records, run_daily_summary
+from .agentic.graph import run_agentic
+from .engine import MemoryCandidate, MemoryOS, message_has_unresolved_references
 from .integrations.factory import build_memory_store
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage, build_qwen_agent
 from .models import ChatTurn, MemorySource, MemoryStatus, MemoryStreamEntry, MemoryStreamKind, MemoryType, SessionState
@@ -89,6 +90,13 @@ class RecallRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=5000)
     query_tags: set[str] = Field(default_factory=set, max_length=20)
     limit: int = Field(default=5, ge=1, le=20)
+
+
+class AgenticRunRequest(BaseModel):
+    user_id: str = Field(default="default", min_length=1, max_length=128)
+    trigger: str = Field(default="manual_api_run", pattern="^(telegram_daily_briefing|manual_api_run|incoming_user_message|memory_reflection|system_health_check)$")
+    input_text: str | None = Field(default=None, max_length=8000)
+    send: bool = False
 
 
 class DailySummarySettingsRequest(BaseModel):
@@ -223,6 +231,43 @@ async def qwen_agent_chat(request: AgentChatRequest, user_id: str = Depends(auth
     memory_os.store.record_audit("tool_call", "qwen-agent", user_id, None, {"tool": "qwen_agent", "session": request.source_session})
     return {"response": response}
 
+
+
+@app.post("/agentic/run")
+async def run_agentic_now(request: AgenticRunRequest, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    target_user = request.user_id or user_id
+    result = await run_in_threadpool(run_agentic, memory_os.store, qwen_client, None, user_id=target_user, trigger=request.trigger, input_text=request.input_text, send=request.send, force_send=request.send)
+    return serialize_agentic_result(result)
+
+
+@app.post("/agentic/daily-briefing/run")
+async def run_agentic_daily_briefing_now(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    result = await run_in_threadpool(run_agentic, memory_os.store, qwen_client, None, user_id=user_id, trigger="telegram_daily_briefing", input_text="Create today's daily briefing", send=True, force_send=True)
+    return serialize_agentic_result(result)
+
+
+@app.post("/agentic/tasks/extract")
+async def extract_agentic_tasks(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    tasks = await run_in_threadpool(extract_and_persist_task_records, user_id, memory_os.store, qwen_client)
+    return {"tasks": [serialize_task_record(task) for task in tasks]}
+
+
+@app.post("/agentic/health-check")
+async def run_agentic_health_check(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    result = await run_in_threadpool(run_agentic, memory_os.store, qwen_client, None, user_id=user_id, trigger="system_health_check", input_text="Check MemOS-Q system health", send=False)
+    return serialize_agentic_result(result)
+
+
+@app.get("/agentic/tasks")
+async def list_agentic_tasks(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    tasks = await run_in_threadpool(memory_os.store.list_task_records, user_id)
+    return {"tasks": [serialize_task_record(task) for task in tasks]}
+
+
+@app.get("/agentic/runs/{run_id}")
+async def get_agentic_run(run_id: str, user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
+    run = await run_in_threadpool(memory_os.store.get_agent_run, run_id)
+    return serialize_agent_run(run)
 
 @app.post("/agent/daily-summary/run")
 async def run_daily_summary_now(user_id: str = Depends(authenticated_user)) -> dict[str, Any]:
@@ -370,6 +415,27 @@ async def update_daily_summary_settings(request: DailySummarySettingsRequest, us
     )
     return serialize_daily_summary_settings(updated)
 
+
+
+def serialize_agentic_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": result.get("metadata", {}).get("run_id"),
+        "final_briefing": result.get("final_briefing"),
+        "should_notify": result.get("should_notify", False),
+        "notification_reason": result.get("notification_reason"),
+        "plan": result.get("plan", []),
+        "observations": result.get("observations", []),
+        "task_updates": result.get("task_updates", []),
+        "errors": result.get("errors", []),
+    }
+
+
+def serialize_task_record(task: Any) -> dict[str, Any]:
+    return {"id": task.id, "user_id": task.user_id, "title": task.title, "status": task.status.value, "blocker_type": task.blocker_type, "blocker": task.blocker, "next_action": task.next_action, "evidence": list(task.evidence), "confidence": task.confidence, "priority": task.priority, "project": task.project, "due_date": task.due_date, "agent_confidence": task.agent_confidence, "source_refs": list(task.source_refs), "updated_at": task.updated_at.isoformat()}
+
+
+def serialize_agent_run(run: Any) -> dict[str, Any]:
+    return {"id": run.id, "user_id": run.user_id, "trigger": run.trigger, "started_at": run.started_at.isoformat(), "finished_at": run.finished_at.isoformat() if run.finished_at else None, "status": run.status, "plan": run.plan_json, "observations": run.observations_json, "final_briefing": run.final_briefing, "should_notify": run.should_notify, "notification_reason": run.notification_reason, "errors": run.errors_json}
 
 def serialize_recall(result: Any) -> dict[str, Any]:
     return {"memory": serialize_memory(result.memory), "score": result.score, "explanation": {"source_session": result.explanation.source_session, "confidence_score": result.explanation.confidence_score, "timestamp": result.explanation.timestamp.isoformat(), "ranking_signals": result.explanation.ranking_signals, "reasoning_path": result.explanation.reasoning_path}}

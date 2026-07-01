@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from memos_q.config import Settings, settings
-from memos_q.models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, TaskRecord, TaskRecordStatus, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
+from memos_q.models import AgentRun, AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, TaskRecord, TaskRecordStatus, MemoryStreamEntry, MemoryStreamKind, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, MemoryType, RelationType, SessionState, utc_now
 from memos_q.store import memory_snapshot, memory_stream_snapshot, profile_snapshot, session_state_snapshot, task_record_snapshot
 
 
@@ -159,6 +159,20 @@ class PostgresMemoryStore:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    finished_at TIMESTAMPTZ,
+                    status TEXT NOT NULL,
+                    plan_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    observations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    final_briefing TEXT,
+                    should_notify BOOLEAN NOT NULL DEFAULT false,
+                    notification_reason TEXT,
+                    errors_json JSONB NOT NULL DEFAULT '[]'::jsonb
+                );
                 CREATE TABLE IF NOT EXISTS task_records (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -171,6 +185,13 @@ class PostgresMemoryStore:
                     confidence DOUBLE PRECISION NOT NULL DEFAULT 0.75,
                     source TEXT NOT NULL DEFAULT 'daily_briefing',
                     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    last_seen_at TIMESTAMPTZ,
+                    last_action_recommended_at TIMESTAMPTZ,
+                    priority TEXT NOT NULL DEFAULT 'normal',
+                    project TEXT,
+                    due_date TEXT,
+                    agent_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.75,
+                    source_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL,
                     UNIQUE (user_id, title)
@@ -204,12 +225,20 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_user_started ON agent_runs(user_id, started_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_records_user_status_updated ON task_records(user_id, status, updated_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversation_turns_user_conversation_created ON conversation_turns(user_id, conversation_id, created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_state_user_conversation ON session_state(user_id, conversation_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_created ON memory_stream(user_id, created_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_stream_user_status ON memory_stream(user_id, status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_summaries_user_created ON daily_summaries(user_id, created_at DESC)")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS last_action_recommended_at TIMESTAMPTZ")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS project TEXT")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS due_date TEXT")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS agent_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.75")
+            cursor.execute("ALTER TABLE task_records ADD COLUMN IF NOT EXISTS source_refs JSONB NOT NULL DEFAULT '[]'::jsonb")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
             cursor.execute("ALTER TABLE memories ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'low'")
@@ -229,6 +258,33 @@ class PostgresMemoryStore:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops)")
         self.connection.commit()
 
+
+
+    def add_agent_run(self, run: AgentRun) -> AgentRun:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO agent_runs (id, user_id, trigger, started_at, finished_at, status, plan_json, observations_json, final_briefing, should_notify, notification_reason, errors_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (run.id, run.user_id, run.trigger, run.started_at, run.finished_at, run.status, json.dumps(run.plan_json), json.dumps(run.observations_json), run.final_briefing, run.should_notify, run.notification_reason, json.dumps(run.errors_json)),
+            )
+            self._record_audit(cursor, "agent_run_create", "agentic-graph", run.id, None, {"user_id": run.user_id, "trigger": run.trigger, "status": run.status})
+        self.connection.commit()
+        return run
+
+    def get_agent_run(self, run_id: str) -> AgentRun:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT id, user_id, trigger, started_at, finished_at, status, plan_json, observations_json, final_briefing, should_notify, notification_reason, errors_json FROM agent_runs WHERE id = %s", (run_id,))
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return AgentRun(id=row[0], user_id=row[1], trigger=row[2], started_at=row[3], finished_at=row[4], status=row[5], plan_json=list(row[6] or []), observations_json=list(row[7] or []), final_briefing=row[8], should_notify=row[9], notification_reason=row[10], errors_json=list(row[11] or []))
+
+    def list_agent_runs(self, user_id: str, *, limit: int = 20) -> list[AgentRun]:
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT id, user_id, trigger, started_at, finished_at, status, plan_json, observations_json, final_briefing, should_notify, notification_reason, errors_json FROM agent_runs WHERE user_id = %s ORDER BY started_at DESC LIMIT %s", (user_id, limit))
+            return [AgentRun(id=r[0], user_id=r[1], trigger=r[2], started_at=r[3], finished_at=r[4], status=r[5], plan_json=list(r[6] or []), observations_json=list(r[7] or []), final_briefing=r[8], should_notify=r[9], notification_reason=r[10], errors_json=list(r[11] or [])) for r in cursor.fetchall()]
 
     def append_conversation_turn(self, user_id: str, conversation_id: str, turn: ChatTurn, *, max_turns: int = 50) -> None:
         with self.connection.cursor() as cursor:
