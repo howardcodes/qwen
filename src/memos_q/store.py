@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .models import AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, TaskRecord, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
+from .models import AgentRun, AuditEvent, ChatTurn, DailySummary, DailySummarySettings, Memory, UserProfile, TaskRecord, MemoryStreamEntry, MemoryConflict, MemoryConflictStatus, MemoryEdge, MemoryStatus, RelationType, SessionState, utc_now
 from .scoring import cosine_similarity
 
 T = TypeVar("T")
@@ -68,6 +68,8 @@ class InMemoryStore:
         self._session_state: dict[tuple[str, str], SessionState] = {}
         self._task_records: dict[str, TaskRecord] = {}
         self._task_records_by_user: dict[str, set[str]] = defaultdict(set)
+        self._agent_runs: dict[str, AgentRun] = {}
+        self._agent_runs_by_user: dict[str, set[str]] = defaultdict(set)
 
     def upsert_task_record(self, task: TaskRecord, *, actor: str = "daily-briefing-agent") -> TaskRecord:
         existing = None
@@ -101,6 +103,19 @@ class InMemoryStore:
             tasks = [task for task in tasks if str(task.status) not in {"done", "dropped"}]
         return sorted(tasks, key=lambda item: item.updated_at, reverse=True)
 
+
+    def add_agent_run(self, run: AgentRun) -> AgentRun:
+        self._agent_runs[run.id] = run
+        self._agent_runs_by_user[run.user_id].add(run.id)
+        self.record_audit("agent_run_create", "agentic-graph", run.id, None, agent_run_snapshot(run))
+        return run
+
+    def get_agent_run(self, run_id: str) -> AgentRun:
+        return self._agent_runs[run_id]
+
+    def list_agent_runs(self, user_id: str, *, limit: int = 20) -> list[AgentRun]:
+        runs = [self._agent_runs[run_id] for run_id in self._agent_runs_by_user[user_id]]
+        return sorted(runs, key=lambda item: item.started_at, reverse=True)[:limit]
 
     def get_user_profile(self, user_id: str) -> UserProfile | None:
         return self._profiles.get(user_id)
@@ -359,6 +374,10 @@ class JsonFileMemoryStore(InMemoryStore):
                 task = _load_model(TaskRecord, item)
                 self._task_records[task.id] = task
                 self._task_records_by_user[task.user_id].add(task.id)
+            for item in payload.get("agent_runs", []):
+                run = _load_model(AgentRun, item)
+                self._agent_runs[run.id] = run
+                self._agent_runs_by_user[run.user_id].add(run.id)
             for item in payload.get("conversation_turns", []):
                 key = (item["user_id"], item["conversation_id"])
                 self._conversation_turns[key] = [_load_model(ChatTurn, turn) for turn in item.get("turns", [])]
@@ -386,6 +405,7 @@ class JsonFileMemoryStore(InMemoryStore):
             "daily_summary_settings": [_dataclass_payload(item) for item in self._daily_summary_settings.values()],
             "daily_summaries": [_dataclass_payload(item) for item in self._daily_summaries.values()],
             "task_records": [_dataclass_payload(item) for item in self._task_records.values()],
+            "agent_runs": [_dataclass_payload(item) for item in self._agent_runs.values()],
             "conversation_turns": [
                 {"user_id": user_id, "conversation_id": conversation_id, "turns": [_dataclass_payload(turn) for turn in turns]}
                 for (user_id, conversation_id), turns in self._conversation_turns.items()
@@ -420,6 +440,13 @@ def task_record_snapshot(task: TaskRecord) -> dict[str, object]:
         "confidence": task.confidence,
         "source": task.source,
         "metadata": dict(task.metadata),
+        "last_seen_at": task.last_seen_at.isoformat() if task.last_seen_at else None,
+        "last_action_recommended_at": task.last_action_recommended_at.isoformat() if task.last_action_recommended_at else None,
+        "priority": task.priority,
+        "project": task.project,
+        "due_date": task.due_date,
+        "agent_confidence": task.agent_confidence,
+        "source_refs": list(task.source_refs),
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat(),
     }
@@ -507,4 +534,14 @@ def session_state_snapshot(state: SessionState) -> dict[str, object]:
         "user_goal": state.user_goal,
         "constraints": list(state.constraints),
         "updated_at": state.updated_at.isoformat(),
+    }
+
+
+def agent_run_snapshot(run: AgentRun) -> dict[str, object]:
+    return {
+        "id": run.id, "user_id": run.user_id, "trigger": run.trigger, "started_at": run.started_at.isoformat(),
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None, "status": run.status,
+        "plan_json": list(run.plan_json), "observations_json": list(run.observations_json),
+        "final_briefing": run.final_briefing, "should_notify": run.should_notify,
+        "notification_reason": run.notification_reason, "errors_json": list(run.errors_json),
     }

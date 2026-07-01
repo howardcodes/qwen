@@ -7,6 +7,7 @@ from celery.schedules import crontab
 
 from memos_q.config import settings
 from memos_q.daily_summary import run_daily_summary
+from memos_q.agentic.graph import run_agentic
 from memos_q.engine import MemoryCandidate, MemoryOS
 from memos_q.integrations.factory import build_memory_store
 from memos_q.integrations.qwen_cloud import QwenCloudClient, QwenMessage
@@ -38,6 +39,14 @@ celery_app.conf.update(
         "daily-telegram-summary": {
             "task": "memos_q.workers.celery_app.send_daily_summaries",
             "schedule": crontab(hour=9, minute=0),
+        },
+        "daily-agentic-briefing": {
+            "task": "memos_q.workers.celery_app.run_daily_agentic_briefing",
+            "schedule": crontab(hour=9, minute=0),
+        },
+        "agentic-system-health-check": {
+            "task": "memos_q.workers.celery_app.run_agentic_system_health_check",
+            "schedule": 60 * 60,
         }
     },
 )
@@ -50,6 +59,33 @@ _memory_os = MemoryOS(
     fallback_embedding_dimensions=settings.qwen_embedding_dimensions,
 )
 
+
+
+@celery_app.task(name="memos_q.workers.celery_app.run_daily_agentic_briefing")
+def run_daily_agentic_briefing() -> dict[str, object]:
+    """Run LangGraph daily briefings for enabled users."""
+
+    results: dict[str, object] = {}
+    for user_id in _memory_os.store.list_user_ids():
+        config = _memory_os.store.get_daily_summary_settings(user_id) if hasattr(_memory_os.store, "get_daily_summary_settings") else None
+        if config and config.enabled:
+            summary = run_daily_summary(user_id, _memory_os.store, _qwen, force_send=False)
+            results[user_id] = {"summary_id": summary.id, "sent_to_telegram": summary.sent_to_telegram, "error_message": summary.error_message}
+    return results
+
+
+@celery_app.task(name="memos_q.workers.celery_app.run_agentic_memory_reflection")
+def run_agentic_memory_reflection(user_id: str = "default") -> dict[str, object]:
+    """Run a safe agentic memory reflection pass."""
+
+    return run_agentic(_memory_os.store, _qwen, None, user_id=user_id, trigger="memory_reflection", input_text="Reflect on durable memory candidates", send=False)
+
+
+@celery_app.task(name="memos_q.workers.celery_app.run_agentic_system_health_check")
+def run_agentic_system_health_check(user_id: str = "default") -> dict[str, object]:
+    """Run LangGraph health checks without crashing Celery on tool/Qwen failures."""
+
+    return run_agentic(_memory_os.store, _qwen, None, user_id=user_id, trigger="system_health_check", input_text="Check system health", send=False)
 
 @celery_app.task(name="memos_q.workers.celery_app.compact_all_active_users")
 def compact_all_active_users() -> dict[str, str]:

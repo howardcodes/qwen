@@ -152,6 +152,13 @@ class TaskRecord:
     confidence: float = 0.75
     source: str = "daily_briefing"
     metadata: dict[str, Any] = field(default_factory=dict)
+    last_seen_at: datetime | None = None
+    last_action_recommended_at: datetime | None = None
+    priority: str = "normal"
+    project: str | None = None
+    due_date: str | None = None
+    agent_confidence: float = 0.75
+    source_refs: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
@@ -159,6 +166,24 @@ class TaskRecord:
     def __post_init__(self) -> None:
         self.status = TaskRecordStatus(self.status)
         self.confidence = clamp_score(self.confidence)
+
+
+@dataclass(slots=True)
+class AgentRun:
+    """Persisted execution trace for one agentic LangGraph run."""
+
+    user_id: str
+    trigger: str
+    status: str = "running"
+    plan_json: list[dict[str, Any]] = field(default_factory=list)
+    observations_json: list[dict[str, Any]] = field(default_factory=list)
+    final_briefing: str | None = None
+    should_notify: bool = False
+    notification_reason: str | None = None
+    errors_json: list[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: str(uuid4()))
+    started_at: datetime = field(default_factory=utc_now)
+    finished_at: datetime | None = field(default_factory=utc_now)
 
 
 @dataclass(slots=True)

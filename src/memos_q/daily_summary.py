@@ -11,6 +11,7 @@ from .config import settings
 from .integrations.qwen_cloud import QwenCloudClient, QwenMessage
 from .models import DailySummary, DailySummarySettings, MemoryStatus, TaskRecord, TaskRecordStatus, utc_now
 from .telegram import TelegramClient, truncate_telegram_message
+from .agentic.graph import run_agentic_daily_briefing
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,8 @@ def generate_daily_summary_text(user_id: str, store, qwen: QwenCloudClient) -> s
 
 
 def run_daily_summary(user_id: str, store, qwen: QwenCloudClient, telegram: TelegramClient | None = None, *, force_send: bool = True) -> DailySummary:
+    """Run the LangGraph daily briefing and persist the legacy DailySummary record."""
+
     user_settings = store.get_daily_summary_settings(user_id) if hasattr(store, "get_daily_summary_settings") else DailySummarySettings(user_id=user_id)
     summary = DailySummary(user_id=user_id)
     telegram = telegram or TelegramClient(chat_id=user_settings.telegram_chat_id or None)
@@ -144,17 +147,25 @@ def run_daily_summary(user_id: str, store, qwen: QwenCloudClient, telegram: Tele
         if not force_send and not user_settings.enabled:
             summary.error_message = "Daily Telegram summary is disabled for this user"
             return store.add_daily_summary(summary) if hasattr(store, "add_daily_summary") else summary
-        summary_text = generate_daily_summary_text(user_id, store, qwen)
-        if not summary_text.strip():
+        result = run_agentic_daily_briefing(user_id=user_id, store=store, qwen_client=qwen, telegram_client=telegram, force_send=force_send)
+        summary_text = truncate_telegram_message(deduplicate_lines(result.get("final_briefing") or ""), limit=3900)
+        summary.summary_text = summary_text
+        if any("qwen returned empty response" in err for err in result.get("errors", [])):
+            summary.summary_text = ""
             summary.error_message = "Summary was empty; nothing sent"
             return store.add_daily_summary(summary) if hasattr(store, "add_daily_summary") else summary
-        summary.summary_text = summary_text
-        result = telegram.send_message(summary_text, chat_id=user_settings.telegram_chat_id or None)
-        summary.sent_to_telegram = result.sent
-        summary.error_message = result.error_message
-        if result.sent:
-            summary.sent_at = utc_now()
+        if not summary_text.strip():
+            summary.error_message = "Skipped: no actionable updates"
+            return store.add_daily_summary(summary) if hasattr(store, "add_daily_summary") else summary
+        if result.get("should_notify"):
+            send_result = telegram.send_message(summary_text, chat_id=user_settings.telegram_chat_id or None)
+            summary.sent_to_telegram = send_result.sent
+            summary.error_message = send_result.error_message
+            if send_result.sent:
+                summary.sent_at = utc_now()
+        else:
+            summary.error_message = result.get("notification_reason") or "Skipped: no actionable updates"
     except Exception as exc:  # worker robustness: persist error and do not crash callers
-        logger.exception("Daily summary generation failed for user %s", user_id)
+        logger.exception("Daily agentic briefing failed for user %s", user_id)
         summary.error_message = str(exc)
     return store.add_daily_summary(summary) if hasattr(store, "add_daily_summary") else summary
