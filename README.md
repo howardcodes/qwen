@@ -408,28 +408,73 @@ Services:
 Important configuration:
 
 ```bash
-MEMOS_STORE=alicloud
+# MemOS-Q production ECS / Alibaba Cloud configuration
 MEMOS_ENV=production
+API_BASE_URL=http://47.236.145.69:8000
+NEXT_PUBLIC_API_BASE_URL=http://47.236.145.69:8000
+FRONTEND_URL=http://47.236.145.69:3000
 
-QWEN_API_KEY=
-QWEN_BASE_URL=
+# Production mode: ECS runs FastAPI plus Postgres/Redis/MinIO, Qwen/DashScope
+# creates embeddings, and Pinecone stores/searches vectors.
+MEMOS_STORE=alicloud
+QWEN_REQUIRE_LIVE_EMBEDDINGS=true
 
-QWEN_CHAT_DEFAULT_MODEL=qwen3.5-flash
+# Qwen / DashScope Model Studio
+QWEN_API_KEY=qwen_api_key_here
+QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 QWEN_REASONING_MODEL=qwen3.5-plus
+QWEN_FLASH_MODEL=qwen3.5-flash
 QWEN_VL_MODEL=qwen3-vl-plus
 QWEN_EMBEDDING_MODEL=text-embedding-v4
+QWEN_EMBEDDING_DIMENSIONS=1024
+QWEN_CHAT_DEFAULT_MODEL=qwen3.5-flash
+QWEN_CHAT_MAX_TOKENS=800
+QWEN_REASONING_MAX_TOKENS=1200
+QWEN_MEMORY_EXTRACTION_MAX_TOKENS=500
+QWEN_CONFLICT_RESOLUTION_MAX_TOKENS=300
+QWEN_SUMMARY_MAX_TOKENS=400
+MEMORY_RECALL_TOP_K=5
+MEMORY_RECALL_VECTOR_TOP_K=10
+MEMORY_RECALL_FALLBACK_LIMIT=20
+MEMORY_EXTRACTION_INCLUDE_ASSISTANT_RESPONSE=false
+MEMORY_EXTRACTION_MAX_INPUT_CHARS=4000
+MEMORY_AUTO_APPROVE_CONFIDENCE=0.80
+MEMORY_CONFLICT_CONFIRMATION_ENABLED=true
 
-PINECONE_API_KEY=
-PINECONE_HOST=
+# Postgres on ECS source of truth for memory/audit records
+POSTGRES_USER=memos
+POSTGRES_PASSWORD=postgres_password_here
+POSTGRES_DB=memos
+POSTGRES_DSN=postgresql://memos:postgres_password_here@postgres:5432/memos
 
-REDIS_URL=
-POSTGRES_DSN=
+# Pinecone vector database for Qwen/DashScope embeddings
+PINECONE_API_KEY=pinecone_api_key_here
+PINECONE_HOST=pinecone_host_here
+PINECONE_INDEX=memos-q-vectors
+PINECONE_NAMESPACE=memos-q
 
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+# Redis / Celery on ECS
+REDIS_URL=redis://:redis_password_here@redis:6379/0
+CELERY_BROKER_URL=redis://:celery_password_here@redis:6379/1
+CELERY_RESULT_BACKEND=redis://:celery_password_here@redis:6379/2
 
-LANGFUSE_PUBLIC_KEY=
-LANGFUSE_SECRET_KEY=
+# MinIO on ECS (S3-compatible endpoint)
+S3_ENDPOINT_URL=http://minio:9000
+S3_ACCESS_KEY_ID=admin
+S3_SECRET_ACCESS_KEY=s3_secret_access_key_here
+S3_BUCKET=memos-q
+S3_REGION=us-east-1
+
+# observability (LLMOps)
+LANGFUSE_PUBLIC_KEY=langfuse_public_key_here
+LANGFUSE_SECRET_KEY=langfuse_secret_key_here
+LANGFUSE_HOST=https://us.cloud.langfuse.com
+MEMOS_ENABLE_OTEL=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+
+# Telegram API
+TELEGRAM_CHAT_ID=telegram_chat_id_here
+TELEGRAM_BOT_TOKEN=telegram_bot_token_here
 ```
 
 ---
