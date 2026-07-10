@@ -410,9 +410,9 @@ Important configuration:
 ```bash
 # MemOS-Q production ECS / Alibaba Cloud configuration
 MEMOS_ENV=production
-API_BASE_URL=http://47.236.145.69:8000
-NEXT_PUBLIC_API_BASE_URL=http://47.236.145.69:8000
-FRONTEND_URL=http://47.236.145.69:3000
+API_BASE_URL=your_deployed_api_base_url
+NEXT_PUBLIC_API_BASE_URL=your_deployed_public_api_base_url
+FRONTEND_URL=your_deployed_frontend_url
 
 # Production mode: ECS runs FastAPI plus Postgres/Redis/MinIO, Qwen/DashScope
 # creates embeddings, and Pinecone stores/searches vectors.
